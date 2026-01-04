@@ -991,9 +991,6 @@ public class GeometricRoomGenerator : MonoBehaviour
     {
         Vector3 offset = new Vector3(x, y, z);
         
-        // Get the light level for this voxel (0-1)
-        float voxelLight = lightGrid[x, y, z];
-        
         // Check if this voxel is a light source
         bool isLight = lightPositionSet.Contains(new Vector3Int(x, y, z));
         
@@ -1002,9 +999,11 @@ public class GeometricRoomGenerator : MonoBehaviour
         {
             byte materialID = MATERIAL_WALL;
             if (isLight) materialID = MATERIAL_LIGHT;
+            float faceLight = isLight ? lightSourceIntensity : 
+                (x > 0 && !finalGrid[x - 1, y, z] ? lightGrid[x - 1, y, z] : 0f);
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
-                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, false, faceLight);
         }
         
         // RIGHT FACE
@@ -1012,9 +1011,11 @@ public class GeometricRoomGenerator : MonoBehaviour
         {
             byte materialID = MATERIAL_WALL;
             if (isLight) materialID = MATERIAL_LIGHT;
+            float faceLight = isLight ? lightSourceIntensity : 
+                (x < gridSize.x - 1 && !finalGrid[x + 1, y, z] ? lightGrid[x + 1, y, z] : 0f);
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
-                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, false, faceLight);
         }
         
         // BOTTOM FACE - FLOOR
@@ -1022,10 +1023,11 @@ public class GeometricRoomGenerator : MonoBehaviour
         {
             byte materialID = MATERIAL_FLOOR;
             if (isLight) materialID = MATERIAL_LIGHT;
-            
+            float faceLight = isLight ? lightSourceIntensity : 
+                (y > 0 && !finalGrid[x, y - 1, z] ? lightGrid[x, y - 1, z] : 0f);
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
-                vertices, triangles, uv, colors, normals, materialID, true, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, true, faceLight);
         }
         
         // TOP FACE - CEILING
@@ -1033,10 +1035,11 @@ public class GeometricRoomGenerator : MonoBehaviour
         {
             byte materialID = MATERIAL_CEILING;
             if (isLight) materialID = MATERIAL_LIGHT;
-            
+            float faceLight = isLight ? lightSourceIntensity : 
+                (y < gridSize.y - 1 && !finalGrid[x, y + 1, z] ? lightGrid[x, y + 1, z] : 0f);
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
-                vertices, triangles, uv, colors, normals, materialID, true, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, true, faceLight);
         }
         
         // FRONT FACE
@@ -1044,9 +1047,11 @@ public class GeometricRoomGenerator : MonoBehaviour
         {
             byte materialID = MATERIAL_WALL;
             if (isLight) materialID = MATERIAL_LIGHT;
+            float faceLight = isLight ? lightSourceIntensity : 
+                (z > 0 && !finalGrid[x, y, z - 1] ? lightGrid[x, y, z - 1] : 0f);
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
-                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, false, faceLight);
         }
         
         // BACK FACE
@@ -1054,9 +1059,11 @@ public class GeometricRoomGenerator : MonoBehaviour
         {
             byte materialID = MATERIAL_WALL;
             if (isLight) materialID = MATERIAL_LIGHT;
+            float faceLight = isLight ? lightSourceIntensity : 
+                (z < gridSize.z - 1 && !finalGrid[x, y, z + 1] ? lightGrid[x, y, z + 1] : 0f);
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
-                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, false, faceLight);
         }
     }
 
