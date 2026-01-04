@@ -58,7 +58,7 @@ Shader "Custom/DungeonTextureShader"
             {
                 v2f o;
                 o.vertex = UnityObjectToClipPos(v.vertex);
-                o.uv = v.uv * _TextureScale;
+                o.uv = v.uv;
                 o.color = v.color;
                 UNITY_TRANSFER_FOG(o, o.vertex);
                 return o;
@@ -67,18 +67,20 @@ Shader "Custom/DungeonTextureShader"
             fixed4 frag (v2f i) : SV_Target
             {
                 // Decode vertex color data
-                int materialID = (int)(i.color.r * 255.0);
+                // Material ID is encoded as: 0=Wall, 1=Floor, 2=Ceiling, 3=Light
+                float materialIDFloat = i.color.r * 3.0; // Multiply by 3 to get actual ID
+                int materialID = (int)round(materialIDFloat);
                 float voxelLight = i.color.g; // Pre-calculated light level for this voxel
                 
                 // Select base texture
                 fixed4 texColor;
                 if (materialID == 1) // Floor
                 {
-                    texColor = tex2D(_FloorTex, i.uv);
+                    texColor = tex2D(_FloorTex, i.uv * _TextureScale);
                 }
                 else if (materialID == 2) // Ceiling
                 {
-                    texColor = tex2D(_CeilingTex, i.uv);
+                    texColor = tex2D(_CeilingTex, i.uv * _TextureScale);
                 }
                 else if (materialID == 3) // Light source
                 {
@@ -86,7 +88,7 @@ Shader "Custom/DungeonTextureShader"
                 }
                 else // Wall (default or materialID == 0)
                 {
-                    texColor = tex2D(_WallTex, i.uv);
+                    texColor = tex2D(_WallTex, i.uv * _TextureScale);
                 }
                 
                 // Minecraft-style lighting: ambient + voxel light

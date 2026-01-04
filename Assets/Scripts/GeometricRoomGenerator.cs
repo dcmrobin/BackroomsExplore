@@ -27,6 +27,8 @@ public class GeometricRoomGenerator : MonoBehaviour
     [SerializeField] private int minLightsPerRoom = 1;
     [SerializeField] private int maxLightsPerRoom = 3;
     [SerializeField] private float lightDecay = 0.15f;
+    [SerializeField] private int lightPropagationSteps = 15;
+    [SerializeField] private float lightSourceIntensity = 1.0f;
     
     [Header("Textures")]
     [SerializeField] private Material dungeonMaterial;
@@ -42,11 +44,12 @@ public class GeometricRoomGenerator : MonoBehaviour
     [SerializeField] private bool generateOnStart = true;
     
     private bool[,,] noiseGrid;
-    private bool[,,] finalGrid;
+    private bool[,,] finalGrid; // True = solid, False = empty
     private float[,,] lightGrid; // Stores light level for each voxel (0-1)
     private List<CuboidRoom> rooms = new List<CuboidRoom>();
     private List<Corridor> corridors = new List<Corridor>();
     private List<Vector3Int> lightPositions = new List<Vector3Int>();
+    private HashSet<Vector3Int> lightPositionSet = new HashSet<Vector3Int>();
     private MeshFilter meshFilter;
     private MeshRenderer meshRenderer;
     
@@ -677,6 +680,7 @@ public class GeometricRoomGenerator : MonoBehaviour
     private void PlaceLights()
     {
         lightPositions.Clear();
+        lightPositionSet.Clear();
         
         foreach (var room in rooms)
         {
@@ -697,6 +701,7 @@ public class GeometricRoomGenerator : MonoBehaviour
                     if (IsInGrid(lightPos) && finalGrid[lightPos.x, lightPos.y, lightPos.z])
                     {
                         lightPositions.Add(lightPos);
+                        lightPositionSet.Add(lightPos);
                     }
                 }
             }
@@ -723,6 +728,7 @@ public class GeometricRoomGenerator : MonoBehaviour
                     if (IsInGrid(lightPos) && finalGrid[lightPos.x, lightPos.y, lightPos.z])
                     {
                         lightPositions.Add(lightPos);
+                        lightPositionSet.Add(lightPos);
                     }
                 }
             }
@@ -743,76 +749,133 @@ public class GeometricRoomGenerator : MonoBehaviour
             }
         }
         
-        // Step 1: Set light sources to maximum brightness
+        // FIRST: Set initial light values for light sources AND their neighboring air voxels
         foreach (var lightPos in lightPositions)
         {
-            if (IsInGrid(lightPos))
-            {
-                lightGrid[lightPos.x, lightPos.y, lightPos.z] = 1.0f; // Full brightness
-            }
-        }
-        
-        // Step 2: Propagate light through empty space (BFS flood fill)
-        PropagateLightFloodFill();
-        
-        // Step 3: Apply some simple smoothing
-        SmoothLighting();
-    }
-
-    private void PropagateLightFloodFill()
-    {
-        // Use BFS to propagate light through air voxels
-        Queue<Vector3Int> queue = new Queue<Vector3Int>();
-        bool[,,] visited = new bool[gridSize.x, gridSize.y, gridSize.z];
-        
-        // Start from all light sources
-        foreach (var lightPos in lightPositions)
-        {
-            if (IsInGrid(lightPos))
-            {
-                queue.Enqueue(lightPos);
-                visited[lightPos.x, lightPos.y, lightPos.z] = true;
-            }
-        }
-        
-        // Directions for 6-connected neighbors
-        Vector3Int[] directions = {
-            Vector3Int.right, Vector3Int.left,
-            Vector3Int.up, Vector3Int.down,
-            Vector3Int.forward, Vector3Int.back
-        };
-        
-        while (queue.Count > 0)
-        {
-            Vector3Int current = queue.Dequeue();
-            float currentLight = lightGrid[current.x, current.y, current.z];
+            if (!IsInGrid(lightPos)) continue;
             
-            // Light decays as it propagates
-            float decayAmount = lightDecay;
+            // Set the light source itself to full brightness (it will glow)
+            lightGrid[lightPos.x, lightPos.y, lightPos.z] = lightSourceIntensity;
+            
+            // Also set neighboring EMPTY voxels to light (light radiates from source)
+            // This is key: light emits from the source into adjacent empty space
+            Vector3Int[] directions = {
+                Vector3Int.right, Vector3Int.left,
+                Vector3Int.up, Vector3Int.down,
+                Vector3Int.forward, Vector3Int.back
+            };
             
             foreach (var dir in directions)
             {
-                Vector3Int neighbor = current + dir;
-                
-                if (!IsInGrid(neighbor) || visited[neighbor.x, neighbor.y, neighbor.z])
-                    continue;
-                
-                // Only propagate through air (non-solid) voxels
-                if (finalGrid[neighbor.x, neighbor.y, neighbor.z])
-                    continue; // Skip solid voxels (walls)
-                
-                // Calculate new light level (decay)
-                float newLight = currentLight - decayAmount;
-                
-                // Only update if new light is brighter than existing light
-                if (newLight > lightGrid[neighbor.x, neighbor.y, neighbor.z])
+                Vector3Int neighbor = lightPos + dir;
+                if (IsInGrid(neighbor) && !finalGrid[neighbor.x, neighbor.y, neighbor.z])
                 {
-                    lightGrid[neighbor.x, neighbor.y, neighbor.z] = Mathf.Max(0, newLight);
-                    queue.Enqueue(neighbor);
-                    visited[neighbor.x, neighbor.y, neighbor.z] = true;
+                    // Direct neighbors get almost full light (small decay)
+                    lightGrid[neighbor.x, neighbor.y, neighbor.z] = 
+                        Mathf.Max(lightGrid[neighbor.x, neighbor.y, neighbor.z], 
+                        lightSourceIntensity - lightDecay * 0.5f);
                 }
             }
         }
+        
+        // SECOND: Propagate light through empty space (multi-pass propagation)
+        for (int step = 0; step < lightPropagationSteps; step++)
+        {
+            float[,,] newLightGrid = (float[,,])lightGrid.Clone();
+            
+            for (int x = 0; x < gridSize.x; x++)
+            {
+                for (int y = 0; y < gridSize.y; y++)
+                {
+                    for (int z = 0; z < gridSize.z; z++)
+                    {
+                        // Skip solid voxels - they don't propagate light
+                        if (finalGrid[x, y, z]) continue;
+                        
+                        // Get the brightest light from all 6 neighboring EMPTY voxels
+                        float maxNeighborLight = 0f;
+                        
+                        // Check all 6 directions
+                        if (x > 0 && !finalGrid[x-1, y, z])
+                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x-1, y, z]);
+                        
+                        if (x < gridSize.x - 1 && !finalGrid[x+1, y, z])
+                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x+1, y, z]);
+                        
+                        if (y > 0 && !finalGrid[x, y-1, z])
+                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y-1, z]);
+                        
+                        if (y < gridSize.y - 1 && !finalGrid[x, y+1, z])
+                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y+1, z]);
+                        
+                        if (z > 0 && !finalGrid[x, y, z-1])
+                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y, z-1]);
+                        
+                        if (z < gridSize.z - 1 && !finalGrid[x, y, z+1])
+                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y, z+1]);
+                        
+                        // Apply decay to propagated light
+                        float propagatedLight = Mathf.Max(0, maxNeighborLight - lightDecay);
+                        
+                        // Keep the brighter of: current light or propagated light
+                        newLightGrid[x, y, z] = Mathf.Max(newLightGrid[x, y, z], propagatedLight);
+                    }
+                }
+            }
+            
+            // Update light grid for next iteration
+            lightGrid = newLightGrid;
+        }
+        
+        // THIRD: Now solid voxels can receive light from adjacent empty voxels
+        // This makes walls near lights appear lit
+        for (int x = 0; x < gridSize.x; x++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int z = 0; z < gridSize.z; z++)
+                {
+                    // Only process solid voxels
+                    if (!finalGrid[x, y, z]) continue;
+                    
+                    // Check if this is a light source - it should be bright
+                    if (lightPositionSet.Contains(new Vector3Int(x, y, z)))
+                    {
+                        lightGrid[x, y, z] = lightSourceIntensity;
+                        continue;
+                    }
+                    
+                    // For non-light solid voxels, get light from adjacent empty space
+                    float maxAdjacentLight = 0f;
+                    
+                    // Check all 6 directions for empty neighbors that have light
+                    if (x > 0 && !finalGrid[x-1, y, z])
+                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x-1, y, z]);
+                    
+                    if (x < gridSize.x - 1 && !finalGrid[x+1, y, z])
+                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x+1, y, z]);
+                    
+                    if (y > 0 && !finalGrid[x, y-1, z])
+                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y-1, z]);
+                    
+                    if (y < gridSize.y - 1 && !finalGrid[x, y+1, z])
+                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y+1, z]);
+                    
+                    if (z > 0 && !finalGrid[x, y, z-1])
+                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y, z-1]);
+                    
+                    if (z < gridSize.z - 1 && !finalGrid[x, y, z+1])
+                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y, z+1]);
+                    
+                    // Solid voxels get attenuated light from neighbors
+                    // Walls get less light than the air next to them
+                    lightGrid[x, y, z] = Mathf.Max(lightGrid[x, y, z], maxAdjacentLight * 0.7f);
+                }
+            }
+        }
+        
+        // FOURTH: Smooth lighting for better visual quality
+        SmoothLighting();
     }
 
     private void SmoothLighting()
@@ -844,14 +907,22 @@ public class GeometricRoomGenerator : MonoBehaviour
                                     ny >= 0 && ny < gridSize.y &&
                                     nz >= 0 && nz < gridSize.z)
                                 {
-                                    sum += lightGrid[nx, ny, nz];
-                                    count++;
+                                    // Only include voxels of the same type in smoothing
+                                    // (solid with solid, empty with empty)
+                                    if (finalGrid[nx, ny, nz] == finalGrid[x, y, z])
+                                    {
+                                        sum += lightGrid[nx, ny, nz];
+                                        count++;
+                                    }
                                 }
                             }
                         }
                     }
                     
-                    smoothed[x, y, z] = sum / count;
+                    if (count > 0)
+                        smoothed[x, y, z] = sum / count;
+                    else
+                        smoothed[x, y, z] = lightGrid[x, y, z];
                 }
             }
         }
@@ -923,10 +994,14 @@ public class GeometricRoomGenerator : MonoBehaviour
         // Get the light level for this voxel (0-1)
         float voxelLight = lightGrid[x, y, z];
         
+        // Check if this voxel is a light source
+        bool isLight = lightPositionSet.Contains(new Vector3Int(x, y, z));
+        
         // LEFT FACE
         if (x == 0 || !finalGrid[x - 1, y, z])
         {
             byte materialID = MATERIAL_WALL;
+            if (isLight) materialID = MATERIAL_LIGHT;
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
                 vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
@@ -936,6 +1011,7 @@ public class GeometricRoomGenerator : MonoBehaviour
         if (x == gridSize.x - 1 || !finalGrid[x + 1, y, z])
         {
             byte materialID = MATERIAL_WALL;
+            if (isLight) materialID = MATERIAL_LIGHT;
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
                 vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
@@ -944,23 +1020,19 @@ public class GeometricRoomGenerator : MonoBehaviour
         // BOTTOM FACE - FLOOR
         if (y == 0 || !finalGrid[x, y - 1, z])
         {
+            byte materialID = MATERIAL_FLOOR;
+            if (isLight) materialID = MATERIAL_LIGHT;
+            
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
-                vertices, triangles, uv, colors, normals, MATERIAL_FLOOR, true, voxelLight);
+                vertices, triangles, uv, colors, normals, materialID, true, voxelLight);
         }
         
-        // TOP FACE - CEILING (or LIGHT if this is a light voxel)
+        // TOP FACE - CEILING
         if (y == gridSize.y - 1 || !finalGrid[x, y + 1, z])
         {
             byte materialID = MATERIAL_CEILING;
-            
-            // Check if this voxel is a light source
-            bool isLight = lightPositions.Any(l => l.x == x && l.y == y && l.z == z);
-            if (isLight) 
-            {
-                materialID = MATERIAL_LIGHT;
-                voxelLight = 1.0f; // Light sources are always full brightness
-            }
+            if (isLight) materialID = MATERIAL_LIGHT;
             
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
@@ -971,6 +1043,7 @@ public class GeometricRoomGenerator : MonoBehaviour
         if (z == 0 || !finalGrid[x, y, z - 1])
         {
             byte materialID = MATERIAL_WALL;
+            if (isLight) materialID = MATERIAL_LIGHT;
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
                 vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
@@ -980,6 +1053,7 @@ public class GeometricRoomGenerator : MonoBehaviour
         if (z == gridSize.z - 1 || !finalGrid[x, y, z + 1])
         {
             byte materialID = MATERIAL_WALL;
+            if (isLight) materialID = MATERIAL_LIGHT;
             AddFaceWithVoxelLighting(offset, 
                 new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
                 vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
@@ -1041,14 +1115,14 @@ public class GeometricRoomGenerator : MonoBehaviour
         }
         
         // Add vertex colors
-        // Red channel = material ID
+        // Red channel = material ID (normalized 0-1)
         // Green channel = voxel light level (0-1)
         // Blue/Alpha = unused
         Color vertexColor = new Color(
-            materialID / 255f,    // Red: Material ID
-            voxelLight,           // Green: Voxel light level
-            0f,                   // Blue: Unused
-            1f                    // Alpha: Full opacity
+            materialID / 3f,    // Red: Material ID (normalized to 0-1, max ID = 3)
+            voxelLight,         // Green: Voxel light level
+            0f,                 // Blue: Unused
+            1f                  // Alpha: Full opacity
         );
         
         for (int i = 0; i < 4; i++)
