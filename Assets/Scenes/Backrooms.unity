@@ -98,7 +98,7 @@ LightmapSettings:
     m_TrainingDataDestination: TrainingData
     m_LightProbeSampleCountMultiplier: 4
   m_LightingDataAsset: {fileID: 0}
-  m_LightingSettings: {fileID: 0}
+  m_LightingSettings: {fileID: 4890085278179872738, guid: 3100c7fe1f7496c4eaecdaa890777fa9, type: 2}
 --- !u!196 &4
 NavMeshSettings:
   serializedVersion: 2
@@ -246,19 +246,22 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5ce9ba55cf76aed44ac8de8e902bfa38, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  gridSize: {x: 60, y: 30, z: 60}
+  gridSize: {x: 60, y: 60, z: 60}
   noiseScale: 0.03
   fillThreshold: 0.4
   smoothingIterations: 2
   minRoomSize: 10
   maxRoomSize: 180
   allowNonCubic: 1
-  aspectRatioTolerance: 0.5
-  corridorWidth: 2
-  corridorHeight: 3
+  minCorridorWidth: 2
+  maxCorridorWidth: 4
+  minCorridorHeight: 3
+  maxCorridorHeight: 5
+  variableCorridorSize: 1
+  scanStep: 2
+  useOctreeOptimization: 1
   caveMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
   generateOnStart: 1
-  showRoomBounds: 1
 --- !u!4 &1367147927
 Transform:
   m_ObjectHideFlags: 0

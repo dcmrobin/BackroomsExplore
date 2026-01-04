@@ -2,32 +2,38 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 
-public class CuboidRoomFitter : MonoBehaviour
+public class OptimizedCuboidRoomGenerator : MonoBehaviour
 {
     [Header("Noise Settings")]
-    [SerializeField] private Vector3Int gridSize = new Vector3Int(64, 32, 64);
-    [SerializeField] private float noiseScale = 0.1f;
+    [SerializeField] private Vector3Int gridSize = new Vector3Int(80, 40, 80);
+    [SerializeField] private float noiseScale = 0.08f;
     [SerializeField] [Range(0, 1)] private float fillThreshold = 0.45f;
-    [SerializeField] private int smoothingIterations = 3;
+    [SerializeField] private int smoothingIterations = 2;
     
     [Header("Room Settings")]
-    [SerializeField] private int minRoomSize = 3;
-    [SerializeField] private int maxRoomSize = 15;
+    [SerializeField] private int minRoomSize = 4;
+    [SerializeField] private int maxRoomSize = 12;
     [SerializeField] private bool allowNonCubic = true;
-    [SerializeField] private float aspectRatioTolerance = 0.5f;
     
     [Header("Corridor Settings")]
-    [SerializeField] private int corridorWidth = 2;
-    [SerializeField] private int corridorHeight = 3;
+    [SerializeField] private int minCorridorWidth = 2;
+    [SerializeField] private int maxCorridorWidth = 4;
+    [SerializeField] private int minCorridorHeight = 3;
+    [SerializeField] private int maxCorridorHeight = 5;
+    [SerializeField] private bool variableCorridorSize = true;
+    
+    [Header("Generation Optimization")]
+    [SerializeField] private int scanStep = 2; // Skip cells when scanning for performance
+    [SerializeField] private bool useOctreeOptimization = true;
     
     [Header("Visualization")]
     [SerializeField] private Material caveMaterial;
     [SerializeField] private bool generateOnStart = true;
-    [SerializeField] private bool showRoomBounds = true;
     
     private bool[,,] noiseGrid;
     private bool[,,] finalGrid;
     private List<CuboidRoom> rooms = new List<CuboidRoom>();
+    private List<Corridor> corridors = new List<Corridor>();
     private MeshFilter meshFilter;
     private MeshRenderer meshRenderer;
     
@@ -37,7 +43,6 @@ public class CuboidRoomFitter : MonoBehaviour
         public Vector3Int maxBounds;
         public Vector3Int center;
         public Vector3Int size;
-        public List<CuboidRoom> connections = new List<CuboidRoom>();
         
         public Bounds Bounds => new Bounds(
             new Vector3(minBounds.x + size.x / 2f, minBounds.y + size.y / 2f, minBounds.z + size.z / 2f),
@@ -53,13 +58,6 @@ public class CuboidRoomFitter : MonoBehaviour
         }
         
         public int Volume => size.x * size.y * size.z;
-        
-        public bool ContainsPoint(Vector3Int point)
-        {
-            return point.x >= minBounds.x && point.x <= maxBounds.x &&
-                   point.y >= minBounds.y && point.y <= maxBounds.y &&
-                   point.z >= minBounds.z && point.z <= maxBounds.z;
-        }
         
         public bool Overlaps(CuboidRoom other)
         {
@@ -86,6 +84,123 @@ public class CuboidRoomFitter : MonoBehaviour
                 }
             }
         }
+        
+        public Vector3Int GetClosestSurfacePoint(Vector3Int target)
+        {
+            // Find closest point on room surface to target
+            Vector3Int closest = center;
+            float closestDist = Vector3Int.Distance(center, target);
+            
+            // Check center of each face
+            Vector3Int[] faceCenters = {
+                new Vector3Int(minBounds.x, center.y, center.z), // Left face
+                new Vector3Int(maxBounds.x, center.y, center.z), // Right face
+                new Vector3Int(center.x, minBounds.y, center.z), // Bottom face
+                new Vector3Int(center.x, maxBounds.y, center.z), // Top face
+                new Vector3Int(center.x, center.y, minBounds.z), // Front face
+                new Vector3Int(center.x, center.y, maxBounds.z)  // Back face
+            };
+            
+            foreach (var faceCenter in faceCenters)
+            {
+                float dist = Vector3Int.Distance(faceCenter, target);
+                if (dist < closestDist)
+                {
+                    closestDist = dist;
+                    closest = faceCenter;
+                }
+            }
+            
+            return closest;
+        }
+    }
+    
+    private class Corridor
+    {
+        public CuboidRoom roomA;
+        public CuboidRoom roomB;
+        public Vector3Int start;
+        public Vector3Int end;
+        public int width;
+        public int height;
+        public List<Vector3Int> pathCells = new List<Vector3Int>();
+        
+        public void CarveIntoGrid(bool[,,] grid, int corridorWidth, int corridorHeight)
+        {
+            width = corridorWidth;
+            height = corridorHeight;
+            
+            // Create proper hallway with walls, floor, and ceiling
+            for (int i = 0; i < pathCells.Count; i++)
+            {
+                Vector3Int cell = pathCells[i];
+                
+                // Determine corridor orientation at this segment
+                bool isHorizontal = (i > 0 && Mathf.Abs(pathCells[i].x - pathCells[i-1].x) > 0) || 
+                                   (i < pathCells.Count - 1 && Mathf.Abs(pathCells[i+1].x - pathCells[i].x) > 0);
+                
+                // For horizontal corridors (X-axis), extend in Z dimension for width
+                // For depth corridors (Z-axis), extend in X dimension for width
+                // Always extend in Y for height
+                
+                int halfWidth = width / 2;
+                int startY = cell.y - height / 2;
+                
+                if (isHorizontal)
+                {
+                    // Corridor runs along X, width is in Z direction
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        for (int dz = -halfWidth; dz <= halfWidth; dz++)
+                        {
+                            for (int dy = 0; dy < height; dy++)
+                            {
+                                Vector3Int corridorCell = new Vector3Int(
+                                    cell.x + dx,
+                                    startY + dy,
+                                    cell.z + dz
+                                );
+                                
+                                if (IsInGrid(corridorCell, grid))
+                                {
+                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Corridor runs along Z, width is in X direction
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        for (int dx = -halfWidth; dx <= halfWidth; dx++)
+                        {
+                            for (int dy = 0; dy < height; dy++)
+                            {
+                                Vector3Int corridorCell = new Vector3Int(
+                                    cell.x + dx,
+                                    startY + dy,
+                                    cell.z + dz
+                                );
+                                
+                                if (IsInGrid(corridorCell, grid))
+                                {
+                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        private bool IsInGrid(Vector3Int pos, bool[,,] grid)
+        {
+            return pos.x >= 0 && pos.x < grid.GetLength(0) &&
+                   pos.y >= 0 && pos.y < grid.GetLength(1) &&
+                   pos.z >= 0 && pos.z < grid.GetLength(2);
+        }
     }
 
     void Start()
@@ -98,14 +213,35 @@ public class CuboidRoomFitter : MonoBehaviour
 
     public void Generate()
     {
+        System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        
         InitializeComponents();
         GenerateNoise();
-        FindCubicRoomsInNoise();
-        ConnectRooms();
-        CarveRoomsAndCorridors();
+        
+        Debug.Log($"Noise generation: {stopwatch.ElapsedMilliseconds}ms");
+        stopwatch.Restart();
+        
+        FindCubicRoomsOptimized();
+        
+        Debug.Log($"Room finding: {stopwatch.ElapsedMilliseconds}ms");
+        stopwatch.Restart();
+        
+        ConnectRoomsWithCorridors();
+        
+        Debug.Log($"Corridor generation: {stopwatch.ElapsedMilliseconds}ms");
+        stopwatch.Restart();
+        
+        CarveEverything();
+        
+        Debug.Log($"Carving: {stopwatch.ElapsedMilliseconds}ms");
+        stopwatch.Restart();
+        
         GenerateMesh();
         
-        Debug.Log($"Generated {rooms.Count} cubic rooms");
+        Debug.Log($"Mesh generation: {stopwatch.ElapsedMilliseconds}ms");
+        Debug.Log($"Total: {rooms.Count} rooms, {corridors.Count} corridors");
+        
+        stopwatch.Stop();
     }
 
     private void InitializeComponents()
@@ -124,44 +260,57 @@ public class CuboidRoomFitter : MonoBehaviour
         noiseGrid = new bool[gridSize.x, gridSize.y, gridSize.z];
         finalGrid = new bool[gridSize.x, gridSize.y, gridSize.z];
         
-        // Generate 3D Perlin noise
-        for (int x = 0; x < gridSize.x; x++)
+        // Fast noise generation using cached values
+        for (int x = 0; x < gridSize.x; x += scanStep)
         {
-            for (int y = 0; y < gridSize.y; y++)
+            for (int y = 0; y < gridSize.y; y += scanStep)
             {
-                for (int z = 0; z < gridSize.z; z++)
+                for (int z = 0; z < gridSize.z; z += scanStep)
                 {
                     float noiseValue = Mathf.PerlinNoise(
                         x * noiseScale + 1000,
                         y * noiseScale + z * noiseScale + 2000
                     );
                     
-                    // Vertical bias - keep rooms more grounded
+                    // Vertical bias
                     float verticalBias = 1f - Mathf.Abs(y - gridSize.y * 0.3f) / (gridSize.y * 0.3f);
                     noiseValue *= (0.7f + 0.3f * verticalBias);
                     
-                    noiseGrid[x, y, z] = noiseValue > fillThreshold;
+                    bool isSolid = noiseValue > fillThreshold;
+                    
+                    // Fill the skipped cells with the same value (optimization)
+                    for (int dx = 0; dx < scanStep && x + dx < gridSize.x; dx++)
+                    {
+                        for (int dy = 0; dy < scanStep && y + dy < gridSize.y; dy++)
+                        {
+                            for (int dz = 0; dz < scanStep && z + dz < gridSize.z; dz++)
+                            {
+                                noiseGrid[x + dx, y + dy, z + dz] = isSolid;
+                            }
+                        }
+                    }
                 }
             }
         }
         
-        SmoothNoise();
+        SmoothNoiseFast();
     }
 
-    private void SmoothNoise()
+    private void SmoothNoiseFast()
     {
         for (int i = 0; i < smoothingIterations; i++)
         {
             bool[,,] smoothed = new bool[gridSize.x, gridSize.y, gridSize.z];
             
+            // Use optimized neighbor counting
             for (int x = 0; x < gridSize.x; x++)
             {
                 for (int y = 0; y < gridSize.y; y++)
                 {
                     for (int z = 0; z < gridSize.z; z++)
                     {
-                        int solidNeighbors = CountNeighbors(x, y, z, noiseGrid);
-                        smoothed[x, y, z] = solidNeighbors >= 14; // Keep only if well-supported
+                        int solidNeighbors = CountNeighborsFast(x, y, z);
+                        smoothed[x, y, z] = solidNeighbors >= 14;
                     }
                 }
             }
@@ -170,130 +319,111 @@ public class CuboidRoomFitter : MonoBehaviour
         }
     }
 
-    private int CountNeighbors(int x, int y, int z, bool[,,] grid)
+    private int CountNeighborsFast(int x, int y, int z)
     {
         int count = 0;
-        for (int dx = -1; dx <= 1; dx++)
+        int xStart = Mathf.Max(0, x - 1);
+        int xEnd = Mathf.Min(gridSize.x - 1, x + 1);
+        int yStart = Mathf.Max(0, y - 1);
+        int yEnd = Mathf.Min(gridSize.y - 1, y + 1);
+        int zStart = Mathf.Max(0, z - 1);
+        int zEnd = Mathf.Min(gridSize.z - 1, z + 1);
+        
+        for (int nx = xStart; nx <= xEnd; nx++)
         {
-            for (int dy = -1; dy <= 1; dy++)
+            for (int ny = yStart; ny <= yEnd; ny++)
             {
-                for (int dz = -1; dz <= 1; dz++)
+                for (int nz = zStart; nz <= zEnd; nz++)
                 {
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    int nz = z + dz;
-                    
-                    if (nx >= 0 && nx < gridSize.x &&
-                        ny >= 0 && ny < gridSize.y &&
-                        nz >= 0 && nz < gridSize.z &&
-                        grid[nx, ny, nz])
-                    {
-                        count++;
-                    }
+                    if (noiseGrid[nx, ny, nz]) count++;
                 }
             }
         }
+        
         return count;
     }
 
-    private void FindCubicRoomsInNoise()
+    private void FindCubicRoomsOptimized()
     {
         rooms.Clear();
-        bool[,,] visited = new bool[gridSize.x, gridSize.y, gridSize.z];
+        bool[,,] occupied = new bool[gridSize.x, gridSize.y, gridSize.z];
         
-        // Scan through grid looking for potential room locations
-        for (int x = 0; x < gridSize.x - minRoomSize; x++)
+        // Use scanStep for performance
+        for (int x = 0; x < gridSize.x - minRoomSize; x += scanStep)
         {
-            for (int y = 0; y < gridSize.y - minRoomSize; y++)
+            for (int y = 0; y < gridSize.y - minRoomSize; y += scanStep)
             {
-                for (int z = 0; z < gridSize.z - minRoomSize; z++)
+                for (int z = 0; z < gridSize.z - minRoomSize; z += scanStep)
                 {
-                    if (!noiseGrid[x, y, z] || visited[x, y, z]) continue;
+                    if (occupied[x, y, z] || !noiseGrid[x, y, z]) continue;
                     
-                    // Find the largest possible cuboid starting from this point
-                    CuboidRoom room = FindLargestCuboidAt(x, y, z, visited);
-                    if (room != null && room.Volume >= minRoomSize * minRoomSize * minRoomSize)
+                    // Quick check: is there enough solid space here for a room?
+                    if (QuickSolidCheck(x, y, z, minRoomSize))
                     {
-                        // Check if room overlaps with existing rooms
-                        bool overlaps = false;
-                        foreach (var existingRoom in rooms)
-                        {
-                            if (room.Overlaps(existingRoom))
-                            {
-                                overlaps = true;
-                                break;
-                            }
-                        }
-                        
-                        if (!overlaps)
+                        CuboidRoom room = FindBestCuboidAt(x, y, z, occupied);
+                        if (room != null && room.Volume >= minRoomSize * minRoomSize * minRoomSize)
                         {
                             rooms.Add(room);
-                            
-                            // Mark all cells in this room as visited
-                            for (int rx = room.minBounds.x; rx <= room.maxBounds.x; rx++)
-                            {
-                                for (int ry = room.minBounds.y; ry <= room.maxBounds.y; ry++)
-                                {
-                                    for (int rz = room.minBounds.z; rz <= room.maxBounds.z; rz++)
-                                    {
-                                        if (rx >= 0 && rx < gridSize.x &&
-                                            ry >= 0 && ry < gridSize.y &&
-                                            rz >= 0 && rz < gridSize.z)
-                                        {
-                                            visited[rx, ry, rz] = true;
-                                        }
-                                    }
-                                }
-                            }
+                            MarkRoomOccupied(room, occupied);
                         }
                     }
                 }
             }
         }
-        
-        Debug.Log($"Found {rooms.Count} potential cubic rooms in noise");
     }
 
-    private CuboidRoom FindLargestCuboidAt(int startX, int startY, int startZ, bool[,,] visited)
+    private bool QuickSolidCheck(int x, int y, int z, int checkSize)
     {
-        // Find the maximum possible cuboid starting from this point
-        int maxWidth = FindMaxDimension(startX, startY, startZ, Vector3Int.right);
-        int maxHeight = FindMaxDimension(startX, startY, startZ, Vector3Int.up);
-        int maxDepth = FindMaxDimension(startX, startY, startZ, Vector3Int.forward);
+        // Quick check of a few sample points
+        int sampleCount = 5;
+        for (int i = 0; i < sampleCount; i++)
+        {
+            int sx = x + Random.Range(0, checkSize);
+            int sy = y + Random.Range(0, checkSize);
+            int sz = z + Random.Range(0, checkSize);
+            
+            if (sx >= gridSize.x || sy >= gridSize.y || sz >= gridSize.z || 
+                !noiseGrid[sx, sy, sz])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private CuboidRoom FindBestCuboidAt(int startX, int startY, int startZ, bool[,,] occupied)
+    {
+        // Find maximum possible dimensions quickly
+        int maxX = FindMaxDimension(startX, startY, startZ, Vector3Int.right, maxRoomSize);
+        int maxY = FindMaxDimension(startX, startY, startZ, Vector3Int.up, maxRoomSize);
+        int maxZ = FindMaxDimension(startX, startY, startZ, Vector3Int.forward, maxRoomSize);
         
-        // Try different cuboid sizes, favoring larger volumes
+        if (maxX < minRoomSize || maxY < minRoomSize || maxZ < minRoomSize)
+            return null;
+        
+        // Try a few random sizes within bounds
         CuboidRoom bestRoom = null;
         int bestVolume = 0;
         
-        // Try different combinations of dimensions
-        for (int w = minRoomSize; w <= Mathf.Min(maxWidth, maxRoomSize); w++)
+        // Limit number of attempts for performance
+        int attempts = 20;
+        for (int i = 0; i < attempts; i++)
         {
-            for (int h = minRoomSize; h <= Mathf.Min(maxHeight, maxRoomSize); h++)
+            int sizeX = Random.Range(minRoomSize, Mathf.Min(maxX, maxRoomSize) + 1);
+            int sizeY = Random.Range(minRoomSize, Mathf.Min(maxY, maxRoomSize) + 1);
+            int sizeZ = Random.Range(minRoomSize, Mathf.Min(maxZ, maxRoomSize) + 1);
+            
+            // Check if this cuboid fits and doesn't overlap occupied space
+            if (CheckCuboidFit(startX, startY, startZ, sizeX, sizeY, sizeZ, occupied))
             {
-                for (int d = minRoomSize; d <= Mathf.Min(maxDepth, maxRoomSize); d++)
+                int volume = sizeX * sizeY * sizeZ;
+                if (volume > bestVolume)
                 {
-                    // Check if this entire cuboid is solid in noise grid
-                    if (IsCuboidSolid(startX, startY, startZ, w, h, d))
-                    {
-                        int volume = w * h * d;
-                        
-                        // Apply aspect ratio constraints if not allowing non-cubic
-                        if (!allowNonCubic)
-                        {
-                            float maxDim = Mathf.Max(w, h, d);
-                            float minDim = Mathf.Min(w, h, d);
-                            if (maxDim / minDim > 2f) continue; // Too elongated
-                        }
-                        
-                        if (volume > bestVolume)
-                        {
-                            bestVolume = volume;
-                            bestRoom = new CuboidRoom(
-                                new Vector3Int(startX, startY, startZ),
-                                new Vector3Int(startX + w - 1, startY + h - 1, startZ + d - 1)
-                            );
-                        }
-                    }
+                    bestVolume = volume;
+                    bestRoom = new CuboidRoom(
+                        new Vector3Int(startX, startY, startZ),
+                        new Vector3Int(startX + sizeX - 1, startY + sizeY - 1, startZ + sizeZ - 1)
+                    );
                 }
             }
         }
@@ -301,7 +431,7 @@ public class CuboidRoomFitter : MonoBehaviour
         return bestRoom;
     }
 
-    private int FindMaxDimension(int x, int y, int z, Vector3Int direction)
+    private int FindMaxDimension(int x, int y, int z, Vector3Int direction, int maxLength)
     {
         int length = 0;
         Vector3Int current = new Vector3Int(x, y, z);
@@ -310,7 +440,7 @@ public class CuboidRoomFitter : MonoBehaviour
                current.y >= 0 && current.y < gridSize.y &&
                current.z >= 0 && current.z < gridSize.z &&
                noiseGrid[current.x, current.y, current.z] &&
-               length < maxRoomSize)
+               length < maxLength)
         {
             length++;
             current += direction;
@@ -319,35 +449,55 @@ public class CuboidRoomFitter : MonoBehaviour
         return length;
     }
 
-    private bool IsCuboidSolid(int startX, int startY, int startZ, int width, int height, int depth)
+    private bool CheckCuboidFit(int x, int y, int z, int sizeX, int sizeY, int sizeZ, bool[,,] occupied)
     {
-        for (int x = startX; x < startX + width; x++)
+        // Check bounds
+        if (x + sizeX > gridSize.x || y + sizeY > gridSize.y || z + sizeZ > gridSize.z)
+            return false;
+        
+        // Check a sampling of points for performance
+        int samples = Mathf.Min(sizeX * sizeY * sizeZ / 10, 50);
+        for (int i = 0; i < samples; i++)
         {
-            for (int y = startY; y < startY + height; y++)
+            int sx = x + Random.Range(0, sizeX);
+            int sy = y + Random.Range(0, sizeY);
+            int sz = z + Random.Range(0, sizeZ);
+            
+            if (!noiseGrid[sx, sy, sz] || occupied[sx, sy, sz])
+                return false;
+        }
+        
+        return true;
+    }
+
+    private void MarkRoomOccupied(CuboidRoom room, bool[,,] occupied)
+    {
+        // Mark with padding to prevent corridors from cutting through rooms
+        int padding = 1;
+        for (int x = room.minBounds.x - padding; x <= room.maxBounds.x + padding; x++)
+        {
+            for (int y = room.minBounds.y - padding; y <= room.maxBounds.y + padding; y++)
             {
-                for (int z = startZ; z < startZ + depth; z++)
+                for (int z = room.minBounds.z - padding; z <= room.maxBounds.z + padding; z++)
                 {
-                    if (x >= gridSize.x || y >= gridSize.y || z >= gridSize.z ||
-                        !noiseGrid[x, y, z])
+                    if (x >= 0 && x < gridSize.x && y >= 0 && y < gridSize.y && z >= 0 && z < gridSize.z)
                     {
-                        return false;
+                        occupied[x, y, z] = true;
                     }
                 }
             }
         }
-        return true;
     }
 
-    private void ConnectRooms()
+    private void ConnectRoomsWithCorridors()
     {
+        corridors.Clear();
+        
         if (rooms.Count < 2) return;
         
-        // Sort rooms by volume (largest first)
-        var sortedRooms = rooms.OrderByDescending(r => r.Volume).ToList();
-        
-        // Create minimum spanning tree
+        // Minimum spanning tree to connect all rooms
         List<CuboidRoom> connected = new List<CuboidRoom>();
-        List<CuboidRoom> unconnected = new List<CuboidRoom>(sortedRooms);
+        List<CuboidRoom> unconnected = new List<CuboidRoom>(rooms);
         
         connected.Add(unconnected[0]);
         unconnected.RemoveAt(0);
@@ -362,7 +512,7 @@ public class CuboidRoomFitter : MonoBehaviour
             {
                 foreach (CuboidRoom unconnectedRoom in unconnected)
                 {
-                    float distance = Vector3.Distance(connectedRoom.center, unconnectedRoom.center);
+                    float distance = Vector3Int.Distance(connectedRoom.center, unconnectedRoom.center);
                     if (distance < closestDistance)
                     {
                         closestDistance = distance;
@@ -374,118 +524,123 @@ public class CuboidRoomFitter : MonoBehaviour
             
             if (closestRoom != null && closestConnected != null)
             {
-                CreateCorridor(closestConnected, closestRoom);
-                closestConnected.connections.Add(closestRoom);
-                closestRoom.connections.Add(closestConnected);
-                
+                CreateCorridorBetween(closestConnected, closestRoom);
                 connected.Add(closestRoom);
                 unconnected.Remove(closestRoom);
             }
         }
         
-        // Add some extra connections for loops
-        AddExtraConnections();
+        // Add some random connections for loops
+        AddExtraCorridors();
     }
 
-    private void AddExtraConnections()
+    private void CreateCorridorBetween(CuboidRoom roomA, CuboidRoom roomB)
+    {
+        Corridor corridor = new Corridor();
+        corridor.roomA = roomA;
+        corridor.roomB = roomB;
+        
+        // Get connection points on room surfaces
+        Vector3Int startPoint = roomA.GetClosestSurfacePoint(roomB.center);
+        Vector3Int endPoint = roomB.GetClosestSurfacePoint(roomA.center);
+        
+        corridor.start = startPoint;
+        corridor.end = endPoint;
+        
+        // Generate L-shaped path
+        List<Vector3Int> path = new List<Vector3Int>();
+        
+        // First segment: align X
+        Vector3Int mid1 = new Vector3Int(endPoint.x, startPoint.y, startPoint.z);
+        GenerateLinePath(startPoint, mid1, path);
+        
+        // Second segment: align Y (if needed)
+        if (mid1.y != endPoint.y)
+        {
+            Vector3Int mid2 = new Vector3Int(endPoint.x, endPoint.y, startPoint.z);
+            GenerateLinePath(mid1, mid2, path);
+            mid1 = mid2;
+        }
+        
+        // Third segment: align Z
+        GenerateLinePath(mid1, endPoint, path);
+        
+        corridor.pathCells = path;
+        
+        // Random corridor dimensions
+        int corridorWidth = variableCorridorSize ? 
+            Random.Range(minCorridorWidth, maxCorridorWidth + 1) : minCorridorWidth;
+        int corridorHeight = variableCorridorSize ? 
+            Random.Range(minCorridorHeight, maxCorridorHeight + 1) : minCorridorHeight;
+        
+        corridor.width = corridorWidth;
+        corridor.height = corridorHeight;
+        
+        corridors.Add(corridor);
+    }
+
+    private void GenerateLinePath(Vector3Int start, Vector3Int end, List<Vector3Int> path)
+    {
+        Vector3Int current = start;
+        
+        while (current != end)
+        {
+            path.Add(current);
+            
+            if (current.x != end.x)
+                current.x += current.x < end.x ? 1 : -1;
+            else if (current.y != end.y)
+                current.y += current.y < end.y ? 1 : -1;
+            else if (current.z != end.z)
+                current.z += current.z < end.z ? 1 : -1;
+        }
+        
+        path.Add(end);
+    }
+
+    private void AddExtraCorridors()
     {
         if (rooms.Count < 3) return;
         
-        int extraConnections = Mathf.Max(1, rooms.Count / 3);
+        int extraCount = Mathf.Max(1, rooms.Count / 4);
         
-        for (int i = 0; i < extraConnections; i++)
+        for (int i = 0; i < extraCount; i++)
         {
             CuboidRoom roomA = rooms[Random.Range(0, rooms.Count)];
             CuboidRoom roomB = rooms[Random.Range(0, rooms.Count)];
             
-            if (roomA != roomB && 
-                !roomA.connections.Contains(roomB) &&
-                Vector3.Distance(roomA.center, roomB.center) < GetAverageRoomDistance() * 1.5f)
+            if (roomA != roomB && !AreRoomsConnected(roomA, roomB))
             {
-                CreateCorridor(roomA, roomB);
-                roomA.connections.Add(roomB);
-                roomB.connections.Add(roomA);
+                CreateCorridorBetween(roomA, roomB);
             }
         }
     }
 
-    private float GetAverageRoomDistance()
+    private bool AreRoomsConnected(CuboidRoom roomA, CuboidRoom roomB)
     {
-        if (rooms.Count < 2) return 0;
-        
-        float total = 0;
-        int pairs = 0;
-        
-        for (int i = 0; i < rooms.Count; i++)
+        foreach (Corridor corridor in corridors)
         {
-            for (int j = i + 1; j < rooms.Count; j++)
+            if ((corridor.roomA == roomA && corridor.roomB == roomB) ||
+                (corridor.roomA == roomB && corridor.roomB == roomA))
             {
-                total += Vector3.Distance(rooms[i].center, rooms[j].center);
-                pairs++;
+                return true;
             }
         }
-        
-        return total / pairs;
+        return false;
     }
 
-    private void CreateCorridor(CuboidRoom roomA, CuboidRoom roomB)
+    private void CarveEverything()
     {
-        Vector3Int start = roomA.center;
-        Vector3Int end = roomB.center;
-        
-        // Create L-shaped corridor
-        CreateCorridorSegment(start, new Vector3Int(end.x, start.y, start.z));
-        CreateCorridorSegment(new Vector3Int(end.x, start.y, start.z), 
-                            new Vector3Int(end.x, end.y, start.z));
-        CreateCorridorSegment(new Vector3Int(end.x, end.y, start.z), 
-                            new Vector3Int(end.x, end.y, end.z));
-    }
-
-    private void CreateCorridorSegment(Vector3Int start, Vector3Int end)
-    {
-        Vector3Int dir = end - start;
-        int steps = Mathf.Max(Mathf.Abs(dir.x), Mathf.Abs(dir.y), Mathf.Abs(dir.z));
-        
-        if (steps == 0) return;
-        
-        Vector3 step = new Vector3(dir.x / (float)steps, dir.y / (float)steps, dir.z / (float)steps);
-        
-        for (int i = 0; i <= steps; i++)
-        {
-            Vector3 pos = start + step * i;
-            Vector3Int gridPos = new Vector3Int(Mathf.RoundToInt(pos.x), Mathf.RoundToInt(pos.y), Mathf.RoundToInt(pos.z));
-            
-            // Create corridor cross-section
-            for (int dx = -corridorWidth; dx <= corridorWidth; dx++)
-            {
-                for (int dy = -corridorHeight; dy <= corridorHeight; dy++)
-                {
-                    for (int dz = -corridorWidth; dz <= corridorWidth; dz++)
-                    {
-                        // Simple box corridor
-                        if (Mathf.Abs(dx) + Mathf.Abs(dy) + Mathf.Abs(dz) <= corridorWidth + 1)
-                        {
-                            Vector3Int corridorCell = gridPos + new Vector3Int(dx, dy, dz);
-                            
-                            if (corridorCell.x >= 0 && corridorCell.x < gridSize.x &&
-                                corridorCell.y >= 0 && corridorCell.y < gridSize.y &&
-                                corridorCell.z >= 0 && corridorCell.z < gridSize.z)
-                            {
-                                finalGrid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private void CarveRoomsAndCorridors()
-    {
-        // Carve all rooms into final grid
+        // Carve rooms
         foreach (var room in rooms)
         {
             room.CarveIntoGrid(finalGrid);
+        }
+        
+        // Carve corridors
+        foreach (var corridor in corridors)
+        {
+            corridor.CarveIntoGrid(finalGrid, corridor.width, corridor.height);
         }
     }
 
@@ -494,7 +649,7 @@ public class CuboidRoomFitter : MonoBehaviour
         List<Vector3> vertices = new List<Vector3>();
         List<int> triangles = new List<int>();
         
-        // Simple greedy meshing
+        // Optimized face generation - only generate exposed faces
         for (int x = 0; x < gridSize.x; x++)
         {
             for (int y = 0; y < gridSize.y; y++)
@@ -503,7 +658,7 @@ public class CuboidRoomFitter : MonoBehaviour
                 {
                     if (finalGrid[x, y, z])
                     {
-                        AddCubeFaces(x, y, z, vertices, triangles);
+                        AddExposedFaces(x, y, z, vertices, triangles);
                     }
                 }
             }
@@ -515,43 +670,35 @@ public class CuboidRoomFitter : MonoBehaviour
         mesh.triangles = triangles.ToArray();
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
-        mesh.Optimize();
         
         meshFilter.mesh = mesh;
-        
-        Debug.Log($"Generated mesh with {vertices.Count} vertices");
     }
 
-    private void AddCubeFaces(int x, int y, int z, List<Vector3> vertices, List<int> triangles)
+    private void AddExposedFaces(int x, int y, int z, List<Vector3> vertices, List<int> triangles)
     {
         Vector3 offset = new Vector3(x, y, z);
         
-        // Front
-        if (z == 0 || !finalGrid[x, y, z - 1])
-            AddFace(offset, new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0), vertices, triangles);
+        // Check neighbors and only add faces that are exposed
+        if (x == 0 || !finalGrid[x - 1, y, z]) // Left
+            AddQuad(offset, new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1), vertices, triangles);
         
-        // Back
-        if (z == gridSize.z - 1 || !finalGrid[x, y, z + 1])
-            AddFace(offset, new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1), vertices, triangles);
+        if (x == gridSize.x - 1 || !finalGrid[x + 1, y, z]) // Right
+            AddQuad(offset, new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0), vertices, triangles);
         
-        // Left
-        if (x == 0 || !finalGrid[x - 1, y, z])
-            AddFace(offset, new Vector3(0,0,1), new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), vertices, triangles);
+        if (y == 0 || !finalGrid[x, y - 1, z]) // Bottom
+            AddQuad(offset, new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0), vertices, triangles);
         
-        // Right
-        if (x == gridSize.x - 1 || !finalGrid[x + 1, y, z])
-            AddFace(offset, new Vector3(1,0,0), new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), vertices, triangles);
+        if (y == gridSize.y - 1 || !finalGrid[x, y + 1, z]) // Top
+            AddQuad(offset, new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1), vertices, triangles);
         
-        // Bottom
-        if (y == 0 || !finalGrid[x, y - 1, z])
-            AddFace(offset, new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0), vertices, triangles);
+        if (z == 0 || !finalGrid[x, y, z - 1]) // Front
+            AddQuad(offset, new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0), vertices, triangles);
         
-        // Top
-        if (y == gridSize.y - 1 || !finalGrid[x, y + 1, z])
-            AddFace(offset, new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1), vertices, triangles);
+        if (z == gridSize.z - 1 || !finalGrid[x, y, z + 1]) // Back
+            AddQuad(offset, new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1), vertices, triangles);
     }
 
-    private void AddFace(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3, List<Vector3> vertices, List<int> triangles)
+    private void AddQuad(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3, List<Vector3> vertices, List<int> triangles)
     {
         int baseIndex = vertices.Count;
         vertices.Add(v0 + offset);
@@ -575,21 +722,23 @@ public class CuboidRoomFitter : MonoBehaviour
 
     void OnDrawGizmosSelected()
     {
-        if (!showRoomBounds || rooms == null) return;
+        if (rooms == null) return;
         
         // Draw room bounds
         Gizmos.color = Color.cyan;
         foreach (var room in rooms)
         {
             Gizmos.DrawWireCube(room.Bounds.center, room.Bounds.size);
-            
-            // Draw connections
-            Gizmos.color = Color.green;
-            foreach (var connectedRoom in room.connections)
+        }
+        
+        // Draw corridor paths
+        Gizmos.color = Color.green;
+        foreach (var corridor in corridors)
+        {
+            for (int i = 0; i < corridor.pathCells.Count - 1; i++)
             {
-                Gizmos.DrawLine(room.center, connectedRoom.center);
+                Gizmos.DrawLine(corridor.pathCells[i], corridor.pathCells[i + 1]);
             }
-            Gizmos.color = Color.cyan;
         }
     }
 }
