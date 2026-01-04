@@ -246,18 +246,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5ce9ba55cf76aed44ac8de8e902bfa38, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  gridSize: {x: 64, y: 32, z: 64}
-  numberOfRooms: 10
-  minDistanceBetweenRooms: 8
-  roomWidthRange: {x: 4, y: 10}
-  roomHeightRange: {x: 3, y: 6}
-  roomDepthRange: {x: 4, y: 10}
+  gridSize: {x: 60, y: 30, z: 60}
+  noiseScale: 0.03
+  fillThreshold: 0.4
+  smoothingIterations: 2
+  minRoomSize: 10
+  maxRoomSize: 180
+  allowNonCubic: 1
+  aspectRatioTolerance: 0.5
   corridorWidth: 2
   corridorHeight: 3
-  connectionChance: 0.7
   caveMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
   generateOnStart: 1
-  showRoomCenters: 1
+  showRoomBounds: 1
 --- !u!4 &1367147927
 Transform:
   m_ObjectHideFlags: 0
