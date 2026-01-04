@@ -82,7 +82,7 @@ Material:
     m_Ints: []
     m_Floats:
     - _AOStrength: 0.5
-    - _Ambient: 0.3
+    - _Ambient: 0.25
     - _AmbientLight: 0.3
     - _BumpScale: 1
     - _Cutoff: 0.5
@@ -95,6 +95,7 @@ Material:
     - _LightCount: 0
     - _LightIntensity: 1
     - _LightRange: 8
+    - _MaxLight: 1
     - _Metallic: 0
     - _Mode: 0
     - _OcclusionStrength: 1
