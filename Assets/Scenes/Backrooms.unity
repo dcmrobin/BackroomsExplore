@@ -156,7 +156,7 @@ MonoBehaviour:
   noiseScale: 0.03
   fillThreshold: 0.4
   smoothingIterations: 2
-  minRoomSize: 10
+  minRoomSize: 7
   maxRoomSize: 180
   allowNonCubic: 1
   minCorridorWidth: 2
