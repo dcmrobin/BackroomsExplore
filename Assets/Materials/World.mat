@@ -82,7 +82,7 @@ Material:
     m_Ints: []
     m_Floats:
     - _AOStrength: 0.5
-    - _Ambient: 0.25
+    - _Ambient: 0.5
     - _AmbientLight: 0.3
     - _BumpScale: 1
     - _Cutoff: 0.5
