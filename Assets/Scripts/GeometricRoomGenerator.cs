@@ -29,6 +29,7 @@ public class GeometricRoomGenerator : MonoBehaviour
     [SerializeField] private float lightDecay = 0.15f;
     [SerializeField] private int lightPropagationSteps = 15;
     [SerializeField] private float lightSourceIntensity = 1.0f;
+    [SerializeField] private bool smoothLighting = true;
     
     [Header("Textures")]
     [SerializeField] private Material dungeonMaterial;
@@ -1122,19 +1123,59 @@ public class GeometricRoomGenerator : MonoBehaviour
         }
         
         // Add vertex colors
-        // Red channel = material ID (normalized 0-1)
-        // Green channel = voxel light level (0-1)
-        // Blue/Alpha = unused
-        Color vertexColor = new Color(
-            materialID / 3f,    // Red: Material ID (normalized to 0-1, max ID = 3)
-            voxelLight,         // Green: Voxel light level
-            0f,                 // Blue: Unused
-            1f                  // Alpha: Full opacity
-        );
-        
-        for (int i = 0; i < 4; i++)
+        if (smoothLighting)
         {
-            colors.Add(vertexColor);
+            // Per-vertex lighting for smooth gradients
+            Vector3[] vertexPositions = { v0 + offset, v1 + offset, v2 + offset, v3 + offset };
+            for (int i = 0; i < 4; i++)
+            {
+                Vector3 pos = vertexPositions[i];
+                int x = Mathf.RoundToInt(pos.x);
+                int y = Mathf.RoundToInt(pos.y);
+                int z = Mathf.RoundToInt(pos.z);
+                
+                // Determine adjacent air position based on face normal
+                int adjX = x, adjY = y, adjZ = z;
+                if (Mathf.Approximately(Mathf.Abs(normal.x), 1)) adjX += (int)normal.x;
+                else if (Mathf.Approximately(Mathf.Abs(normal.y), 1)) adjY += (int)normal.y;
+                else if (Mathf.Approximately(Mathf.Abs(normal.z), 1)) adjZ += (int)normal.z;
+                
+                float vertexLight = 0f;
+                if (IsInGrid(new Vector3Int(adjX, adjY, adjZ)))
+                {
+                    vertexLight = lightGrid[adjX, adjY, adjZ];
+                }
+                
+                // Override for light sources
+                if (lightPositionSet.Contains(new Vector3Int(x, y, z)))
+                {
+                    vertexLight = lightSourceIntensity;
+                }
+                
+                Color vertexColor = new Color(
+                    materialID / 3f,    // Red: Material ID (normalized to 0-1)
+                    vertexLight,        // Green: Vertex light level
+                    0f,                 // Blue: Unused
+                    1f                  // Alpha: Full opacity
+                );
+                
+                colors.Add(vertexColor);
+            }
+        }
+        else
+        {
+            // Uniform lighting per face
+            Color vertexColor = new Color(
+                materialID / 3f,    // Red: Material ID (normalized to 0-1, max ID = 3)
+                voxelLight,         // Green: Voxel light level
+                0f,                 // Blue: Unused
+                1f                  // Alpha: Full opacity
+            );
+            
+            for (int i = 0; i < 4; i++)
+            {
+                colors.Add(vertexColor);
+            }
         }
     }
 
