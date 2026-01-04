@@ -2,7 +2,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 
-public class FaceBasedTexturedGenerator : MonoBehaviour
+public class GeometricRoomGenerator : MonoBehaviour
 {
     [Header("Noise Settings")]
     [SerializeField] private Vector3Int gridSize = new Vector3Int(80, 40, 80);
@@ -22,6 +22,12 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
     [SerializeField] private int maxCorridorHeight = 5;
     [SerializeField] private bool variableCorridorSize = true;
     
+    [Header("Lighting")]
+    [SerializeField] private float lightPlacementChance = 0.2f;
+    [SerializeField] private int minLightsPerRoom = 1;
+    [SerializeField] private int maxLightsPerRoom = 3;
+    [SerializeField] private float lightDecay = 0.15f;
+    
     [Header("Textures")]
     [SerializeField] private Material dungeonMaterial;
     [SerializeField] private Texture2D wallTexture;
@@ -37,8 +43,10 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
     
     private bool[,,] noiseGrid;
     private bool[,,] finalGrid;
+    private float[,,] lightGrid; // Stores light level for each voxel (0-1)
     private List<CuboidRoom> rooms = new List<CuboidRoom>();
     private List<Corridor> corridors = new List<Corridor>();
+    private List<Vector3Int> lightPositions = new List<Vector3Int>();
     private MeshFilter meshFilter;
     private MeshRenderer meshRenderer;
     
@@ -46,6 +54,7 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
     private const byte MATERIAL_WALL = 0;
     private const byte MATERIAL_FLOOR = 1;
     private const byte MATERIAL_CEILING = 2;
+    private const byte MATERIAL_LIGHT = 3;
     
     private class CuboidRoom
     {
@@ -153,7 +162,6 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
                 
                 if (isHorizontal)
                 {
-                    // Corridor along X axis
                     for (int dx = -1; dx <= 1; dx++)
                     {
                         for (int dz = -halfWidth; dz <= halfWidth; dz++)
@@ -176,7 +184,6 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
                 }
                 else
                 {
-                    // Corridor along Z axis
                     for (int dz = -1; dz <= 1; dz++)
                     {
                         for (int dx = -halfWidth; dx <= halfWidth; dx++)
@@ -241,11 +248,21 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
         Debug.Log($"Carving: {stopwatch.ElapsedMilliseconds}ms");
         stopwatch.Restart();
         
+        PlaceLights();
+        
+        Debug.Log($"Light placement: {stopwatch.ElapsedMilliseconds}ms");
+        stopwatch.Restart();
+        
+        CalculateVoxelLighting();
+        
+        Debug.Log($"Lighting calculation: {stopwatch.ElapsedMilliseconds}ms");
+        stopwatch.Restart();
+        
         SetupMaterial();
-        GenerateFaceBasedMesh(); // NEW: Face-based mesh generation
+        GenerateLitMesh();
         
         Debug.Log($"Mesh generation: {stopwatch.ElapsedMilliseconds}ms");
-        Debug.Log($"Total: {rooms.Count} rooms, {corridors.Count} corridors");
+        Debug.Log($"Total: {rooms.Count} rooms, {corridors.Count} corridors, {lightPositions.Count} lights");
         
         stopwatch.Stop();
     }
@@ -281,6 +298,7 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
     {
         noiseGrid = new bool[gridSize.x, gridSize.y, gridSize.z];
         finalGrid = new bool[gridSize.x, gridSize.y, gridSize.z];
+        lightGrid = new float[gridSize.x, gridSize.y, gridSize.z];
         
         for (int x = 0; x < gridSize.x; x += scanStep)
         {
@@ -656,14 +674,218 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
         }
     }
 
-    private void GenerateFaceBasedMesh()
+    private void PlaceLights()
+    {
+        lightPositions.Clear();
+        
+        foreach (var room in rooms)
+        {
+            int lightsInRoom = Random.Range(minLightsPerRoom, maxLightsPerRoom + 1);
+            
+            for (int i = 0; i < lightsInRoom; i++)
+            {
+                if (Random.value <= lightPlacementChance)
+                {
+                    // Place light in ceiling (top layer of room)
+                    int lightX = Random.Range(room.minBounds.x + 1, room.maxBounds.x);
+                    int lightY = room.maxBounds.y; // Ceiling level
+                    int lightZ = Random.Range(room.minBounds.z + 1, room.maxBounds.z);
+                    
+                    Vector3Int lightPos = new Vector3Int(lightX, lightY, lightZ);
+                    
+                    // Make sure position is valid and in grid
+                    if (IsInGrid(lightPos) && finalGrid[lightPos.x, lightPos.y, lightPos.z])
+                    {
+                        lightPositions.Add(lightPos);
+                    }
+                }
+            }
+        }
+        
+        // Also place some lights in corridors
+        foreach (var corridor in corridors)
+        {
+            if (Random.value < lightPlacementChance * 0.3f) // Fewer lights in corridors
+            {
+                if (corridor.pathCells.Count > 0)
+                {
+                    // Pick a random cell along the corridor path
+                    int index = Random.Range(0, corridor.pathCells.Count);
+                    Vector3Int cell = corridor.pathCells[index];
+                    
+                    // Place light at ceiling level of corridor
+                    Vector3Int lightPos = new Vector3Int(
+                        cell.x,
+                        cell.y + corridor.height / 2, // Ceiling of corridor
+                        cell.z
+                    );
+                    
+                    if (IsInGrid(lightPos) && finalGrid[lightPos.x, lightPos.y, lightPos.z])
+                    {
+                        lightPositions.Add(lightPos);
+                    }
+                }
+            }
+        }
+    }
+
+    private void CalculateVoxelLighting()
+    {
+        // Initialize light grid to zero
+        for (int x = 0; x < gridSize.x; x++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int z = 0; z < gridSize.z; z++)
+                {
+                    lightGrid[x, y, z] = 0f;
+                }
+            }
+        }
+        
+        // Step 1: Set light sources to maximum brightness
+        foreach (var lightPos in lightPositions)
+        {
+            if (IsInGrid(lightPos))
+            {
+                lightGrid[lightPos.x, lightPos.y, lightPos.z] = 1.0f; // Full brightness
+            }
+        }
+        
+        // Step 2: Propagate light through empty space (BFS flood fill)
+        PropagateLightFloodFill();
+        
+        // Step 3: Apply some simple smoothing
+        SmoothLighting();
+    }
+
+    private void PropagateLightFloodFill()
+    {
+        // Use BFS to propagate light through air voxels
+        Queue<Vector3Int> queue = new Queue<Vector3Int>();
+        bool[,,] visited = new bool[gridSize.x, gridSize.y, gridSize.z];
+        
+        // Start from all light sources
+        foreach (var lightPos in lightPositions)
+        {
+            if (IsInGrid(lightPos))
+            {
+                queue.Enqueue(lightPos);
+                visited[lightPos.x, lightPos.y, lightPos.z] = true;
+            }
+        }
+        
+        // Directions for 6-connected neighbors
+        Vector3Int[] directions = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+        
+        while (queue.Count > 0)
+        {
+            Vector3Int current = queue.Dequeue();
+            float currentLight = lightGrid[current.x, current.y, current.z];
+            
+            // Light decays as it propagates
+            float decayAmount = lightDecay;
+            
+            foreach (var dir in directions)
+            {
+                Vector3Int neighbor = current + dir;
+                
+                if (!IsInGrid(neighbor) || visited[neighbor.x, neighbor.y, neighbor.z])
+                    continue;
+                
+                // Only propagate through air (non-solid) voxels
+                if (finalGrid[neighbor.x, neighbor.y, neighbor.z])
+                    continue; // Skip solid voxels (walls)
+                
+                // Calculate new light level (decay)
+                float newLight = currentLight - decayAmount;
+                
+                // Only update if new light is brighter than existing light
+                if (newLight > lightGrid[neighbor.x, neighbor.y, neighbor.z])
+                {
+                    lightGrid[neighbor.x, neighbor.y, neighbor.z] = Mathf.Max(0, newLight);
+                    queue.Enqueue(neighbor);
+                    visited[neighbor.x, neighbor.y, neighbor.z] = true;
+                }
+            }
+        }
+    }
+
+    private void SmoothLighting()
+    {
+        // Simple 3x3x3 box blur for smoother transitions
+        float[,,] smoothed = new float[gridSize.x, gridSize.y, gridSize.z];
+        
+        for (int x = 0; x < gridSize.x; x++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int z = 0; z < gridSize.z; z++)
+                {
+                    float sum = 0;
+                    int count = 0;
+                    
+                    // 3x3x3 neighborhood
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        for (int dy = -1; dy <= 1; dy++)
+                        {
+                            for (int dz = -1; dz <= 1; dz++)
+                            {
+                                int nx = x + dx;
+                                int ny = y + dy;
+                                int nz = z + dz;
+                                
+                                if (nx >= 0 && nx < gridSize.x &&
+                                    ny >= 0 && ny < gridSize.y &&
+                                    nz >= 0 && nz < gridSize.z)
+                                {
+                                    sum += lightGrid[nx, ny, nz];
+                                    count++;
+                                }
+                            }
+                        }
+                    }
+                    
+                    smoothed[x, y, z] = sum / count;
+                }
+            }
+        }
+        
+        // Copy back with some original preservation
+        for (int x = 0; x < gridSize.x; x++)
+        {
+            for (int y = 0; y < gridSize.y; y++)
+            {
+                for (int z = 0; z < gridSize.z; z++)
+                {
+                    // Blend original and smoothed (70% smoothed, 30% original)
+                    lightGrid[x, y, z] = smoothed[x, y, z] * 0.7f + lightGrid[x, y, z] * 0.3f;
+                }
+            }
+        }
+    }
+
+    private bool IsInGrid(Vector3Int pos)
+    {
+        return pos.x >= 0 && pos.x < gridSize.x &&
+               pos.y >= 0 && pos.y < gridSize.y &&
+               pos.z >= 0 && pos.z < gridSize.z;
+    }
+
+    private void GenerateLitMesh()
     {
         List<Vector3> vertices = new List<Vector3>();
         List<int> triangles = new List<int>();
         List<Vector2> uv = new List<Vector2>();
         List<Color> colors = new List<Color>();
+        List<Vector3> normals = new List<Vector3>();
         
-        // Generate mesh face by face with correct material per face
+        // Generate mesh with lighting data
         for (int x = 0; x < gridSize.x; x++)
         {
             for (int y = 0; y < gridSize.y; y++)
@@ -672,7 +894,7 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
                 {
                     if (finalGrid[x, y, z])
                     {
-                        AddFacesWithCorrectMaterials(x, y, z, vertices, triangles, uv, colors);
+                        AddFacesWithLightingData(x, y, z, vertices, triangles, uv, colors, normals);
                     }
                 }
             }
@@ -684,196 +906,90 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
         mesh.triangles = triangles.ToArray();
         mesh.uv = uv.ToArray();
         mesh.colors = colors.ToArray();
-        mesh.RecalculateNormals();
+        mesh.normals = normals.ToArray();
         mesh.RecalculateBounds();
         mesh.Optimize();
         
         meshFilter.mesh = mesh;
         
-        Debug.Log($"Generated face-based mesh: {vertices.Count} vertices, {triangles.Count/3} triangles");
+        Debug.Log($"Generated mesh: {vertices.Count} vertices, {triangles.Count/3} triangles, {lightPositions.Count} lights");
     }
 
-    private void AddFacesWithCorrectMaterials(int x, int y, int z, List<Vector3> vertices, List<int> triangles, List<Vector2> uv, List<Color> colors)
+    private void AddFacesWithLightingData(int x, int y, int z, List<Vector3> vertices, List<int> triangles, 
+                                          List<Vector2> uv, List<Color> colors, List<Vector3> normals)
     {
         Vector3 offset = new Vector3(x, y, z);
         
-        // Check each face and determine its material based on position and neighbor
+        // Get the light level for this voxel (0-1)
+        float voxelLight = lightGrid[x, y, z];
         
-        // LEFT FACE (facing negative X)
+        // LEFT FACE
         if (x == 0 || !finalGrid[x - 1, y, z])
         {
-            byte materialID = GetFaceMaterialID(x, y, z, Vector3Int.left);
-            AddFace(offset, 
+            byte materialID = MATERIAL_WALL;
+            AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
-                vertices, triangles, uv, colors, materialID, false);
+                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
         }
         
-        // RIGHT FACE (facing positive X)
+        // RIGHT FACE
         if (x == gridSize.x - 1 || !finalGrid[x + 1, y, z])
         {
-            byte materialID = GetFaceMaterialID(x, y, z, Vector3Int.right);
-            AddFace(offset, 
+            byte materialID = MATERIAL_WALL;
+            AddFaceWithVoxelLighting(offset, 
                 new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
-                vertices, triangles, uv, colors, materialID, false);
+                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
         }
         
-        // BOTTOM FACE (facing negative Y) - ALWAYS FLOOR
+        // BOTTOM FACE - FLOOR
         if (y == 0 || !finalGrid[x, y - 1, z])
         {
-            AddFace(offset, 
+            AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
-                vertices, triangles, uv, colors, MATERIAL_FLOOR, true);
+                vertices, triangles, uv, colors, normals, MATERIAL_FLOOR, true, voxelLight);
         }
         
-        // TOP FACE (facing positive Y) - ALWAYS CEILING
+        // TOP FACE - CEILING (or LIGHT if this is a light voxel)
         if (y == gridSize.y - 1 || !finalGrid[x, y + 1, z])
         {
-            AddFace(offset, 
+            byte materialID = MATERIAL_CEILING;
+            
+            // Check if this voxel is a light source
+            bool isLight = lightPositions.Any(l => l.x == x && l.y == y && l.z == z);
+            if (isLight) 
+            {
+                materialID = MATERIAL_LIGHT;
+                voxelLight = 1.0f; // Light sources are always full brightness
+            }
+            
+            AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
-                vertices, triangles, uv, colors, MATERIAL_CEILING, true);
+                vertices, triangles, uv, colors, normals, materialID, true, voxelLight);
         }
         
-        // FRONT FACE (facing negative Z)
+        // FRONT FACE
         if (z == 0 || !finalGrid[x, y, z - 1])
         {
-            byte materialID = GetFaceMaterialID(x, y, z, Vector3Int.back); // Note: back = negative Z
-            AddFace(offset, 
+            byte materialID = MATERIAL_WALL;
+            AddFaceWithVoxelLighting(offset, 
                 new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
-                vertices, triangles, uv, colors, materialID, false);
+                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
         }
         
-        // BACK FACE (facing positive Z)
+        // BACK FACE
         if (z == gridSize.z - 1 || !finalGrid[x, y, z + 1])
         {
-            byte materialID = GetFaceMaterialID(x, y, z, Vector3Int.forward);
-            AddFace(offset, 
+            byte materialID = MATERIAL_WALL;
+            AddFaceWithVoxelLighting(offset, 
                 new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
-                vertices, triangles, uv, colors, materialID, false);
+                vertices, triangles, uv, colors, normals, materialID, false, voxelLight);
         }
     }
 
-    private byte GetFaceMaterialID(int x, int y, int z, Vector3Int faceDirection)
-    {
-        // Determine if this face should be floor, ceiling, or wall based on position
-        
-        // If this is a vertical face (not floor/ceiling), check if it's adjacent to floor or ceiling
-        if (faceDirection.y == 0) // Horizontal face (floor/ceiling handled separately)
-        {
-            // Check the cell above and below this face to determine if it's a wall or part of floor/ceiling
-            Vector3Int aboveCell = new Vector3Int(x, y + 1, z);
-            Vector3Int belowCell = new Vector3Int(x, y - 1, z);
-            
-            bool hasFloorBelow = IsInGrid(belowCell) && finalGrid[belowCell.x, belowCell.y, belowCell.z];
-            bool hasCeilingAbove = IsInGrid(aboveCell) && finalGrid[aboveCell.x, aboveCell.y, aboveCell.z];
-            
-            // Check the cell in the direction of the face
-            Vector3Int adjacentCell = new Vector3Int(x + faceDirection.x, y + faceDirection.y, z + faceDirection.z);
-            
-            // If the adjacent cell is empty (this is an exterior face), always use wall material
-            if (!IsInGrid(adjacentCell) || !finalGrid[adjacentCell.x, adjacentCell.y, adjacentCell.z])
-            {
-                // This is an exterior wall face
-                // Check if this face is at floor or ceiling level of a corridor
-                if (IsCorridorFloorLevel(x, y, z) && IsVerticalCorridorWall(x, y, z, faceDirection))
-                {
-                    return MATERIAL_WALL; // Corridor walls are always walls
-                }
-                else if (IsCorridorCeilingLevel(x, y, z) && IsVerticalCorridorWall(x, y, z, faceDirection))
-                {
-                    return MATERIAL_WALL; // Corridor walls are always walls
-                }
-                else
-                {
-                    return MATERIAL_WALL; // Default to wall
-                }
-            }
-        }
-        
-        return MATERIAL_WALL; // Default to wall for all vertical faces
-    }
-
-    private bool IsCorridorFloorLevel(int x, int y, int z)
-    {
-        // Check if this is at corridor floor level (y is minimum in local area)
-        if (!IsInGrid(new Vector3Int(x, y, z))) return false;
-        
-        // Check cells around to see if this is a floor
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            for (int dz = -1; dz <= 1; dz++)
-            {
-                Vector3Int checkPos = new Vector3Int(x + dx, y, z + dz);
-                Vector3Int belowPos = new Vector3Int(x + dx, y - 1, z + dz);
-                
-                if (IsInGrid(checkPos) && finalGrid[checkPos.x, checkPos.y, checkPos.z])
-                {
-                    if (IsInGrid(belowPos) && !finalGrid[belowPos.x, belowPos.y, belowPos.z])
-                    {
-                        return true; // This cell is above air, could be floor
-                    }
-                }
-            }
-        }
-        
-        return false;
-    }
-
-    private bool IsCorridorCeilingLevel(int x, int y, int z)
-    {
-        // Check if this is at corridor ceiling level (y is maximum in local area)
-        if (!IsInGrid(new Vector3Int(x, y, z))) return false;
-        
-        // Check cells around to see if this is a ceiling
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            for (int dz = -1; dz <= 1; dz++)
-            {
-                Vector3Int checkPos = new Vector3Int(x + dx, y, z + dz);
-                Vector3Int abovePos = new Vector3Int(x + dx, y + 1, z + dz);
-                
-                if (IsInGrid(checkPos) && finalGrid[checkPos.x, checkPos.y, checkPos.z])
-                {
-                    if (IsInGrid(abovePos) && !finalGrid[abovePos.x, abovePos.y, abovePos.z])
-                    {
-                        return true; // This cell is below air, could be ceiling
-                    }
-                }
-            }
-        }
-        
-        return false;
-    }
-
-    private bool IsVerticalCorridorWall(int x, int y, int z, Vector3Int faceDirection)
-    {
-        // Check if this is a vertical wall in a corridor
-        // Corridor walls are always vertical and between floor and ceiling
-        if (faceDirection.y != 0) return false; // Not vertical
-        
-        // Check if we're between floor and ceiling levels
-        Vector3Int below = new Vector3Int(x, y - 1, z);
-        Vector3Int above = new Vector3Int(x, y + 1, z);
-        
-        bool hasSolidBelow = IsInGrid(below) && finalGrid[below.x, below.y, below.z];
-        bool hasSolidAbove = IsInGrid(above) && finalGrid[above.x, above.y, above.z];
-        
-        // Check adjacent in face direction
-        Vector3Int adjacent = new Vector3Int(x + faceDirection.x, y + faceDirection.y, z + faceDirection.z);
-        bool adjacentIsAir = !IsInGrid(adjacent) || !finalGrid[adjacent.x, adjacent.y, adjacent.z];
-        
-        return hasSolidBelow && hasSolidAbove && adjacentIsAir;
-    }
-
-    private bool IsInGrid(Vector3Int pos)
-    {
-        return pos.x >= 0 && pos.x < gridSize.x &&
-               pos.y >= 0 && pos.y < gridSize.y &&
-               pos.z >= 0 && pos.z < gridSize.z;
-    }
-
-    private void AddFace(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3,
-                        List<Vector3> vertices, List<int> triangles, List<Vector2> uvList, 
-                        List<Color> colors, byte materialID, bool isHorizontal)
+    private void AddFaceWithVoxelLighting(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3,
+                                       List<Vector3> vertices, List<int> triangles, List<Vector2> uvList, 
+                                       List<Color> colors, List<Vector3> normals, byte materialID, 
+                                       bool isHorizontal, float voxelLight)
     {
         int baseIndex = vertices.Count;
         
@@ -897,7 +1013,6 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
         
         if (isHorizontal)
         {
-            // Horizontal face (floor/ceiling)
             width = Vector3.Distance(v0, v3);
             height = Vector3.Distance(v0, v1);
             uvList.Add(new Vector2(0, 0));
@@ -907,7 +1022,6 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
         }
         else
         {
-            // Vertical face (wall)
             width = Vector3.Distance(v0, v1);
             height = Vector3.Distance(v0, v3);
             uvList.Add(new Vector2(0, 0));
@@ -916,11 +1030,30 @@ public class FaceBasedTexturedGenerator : MonoBehaviour
             uvList.Add(new Vector2(width * textureScale.x, 0));
         }
         
-        // Add material ID (encoded in red channel)
-        Color materialColor = new Color(materialID / 255f, 0, 0, 1);
+        // Calculate face normal
+        Vector3 normal = Vector3.Cross(v1 - v0, v2 - v1).normalized;
+        if (isHorizontal && normal.y < 0) normal = -normal;
+        
+        // Add normals
         for (int i = 0; i < 4; i++)
         {
-            colors.Add(materialColor);
+            normals.Add(normal);
+        }
+        
+        // Add vertex colors
+        // Red channel = material ID
+        // Green channel = voxel light level (0-1)
+        // Blue/Alpha = unused
+        Color vertexColor = new Color(
+            materialID / 255f,    // Red: Material ID
+            voxelLight,           // Green: Voxel light level
+            0f,                   // Blue: Unused
+            1f                    // Alpha: Full opacity
+        );
+        
+        for (int i = 0; i < 4; i++)
+        {
+            colors.Add(vertexColor);
         }
     }
 

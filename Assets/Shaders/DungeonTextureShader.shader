@@ -2,11 +2,17 @@ Shader "Custom/DungeonTextureShader"
 {
     Properties
     {
+        // Textures
         _WallTex ("Wall Texture", 2D) = "white" {}
         _FloorTex ("Floor Texture", 2D) = "white" {}
         _CeilingTex ("Ceiling Texture", 2D) = "white" {}
+        
+        // Basic lighting
+        _Ambient ("Ambient Light", Range(0, 1)) = 0.15
+        _MaxLight ("Max Light Level", Range(0, 1)) = 1.0
+        
+        // Texture Tiling
         _TextureScale ("Texture Scale", Vector) = (1, 1, 0, 0)
-        _AmbientLight ("Ambient Light", Range(0, 1)) = 0.3
     }
     
     SubShader
@@ -27,74 +33,85 @@ Shader "Custom/DungeonTextureShader"
             {
                 float4 vertex : POSITION;
                 float2 uv : TEXCOORD0;
-                float3 normal : NORMAL;
-                float4 color : COLOR; // Contains material ID in red channel
+                float4 color : COLOR; // Material ID in R, Light level in G
             };
 
             struct v2f
             {
                 float2 uv : TEXCOORD0;
-                float fogCoord : TEXCOORD1;
-                float3 normal : TEXCOORD2;
-                float4 vertex : SV_POSITION;
                 float4 color : COLOR;
+                float fogCoord : TEXCOORD1;
+                float4 vertex : SV_POSITION;
             };
 
+            // Textures
             sampler2D _WallTex;
             sampler2D _FloorTex;
             sampler2D _CeilingTex;
-            float4 _WallTex_ST;
-            float4 _FloorTex_ST;
-            float4 _CeilingTex_ST;
+            
+            // Lighting properties
+            float _Ambient;
+            float _MaxLight;
             float2 _TextureScale;
-            float _AmbientLight;
 
             v2f vert (appdata v)
             {
                 v2f o;
                 o.vertex = UnityObjectToClipPos(v.vertex);
-                o.uv = v.uv * _TextureScale; // Apply texture scaling
-                o.normal = UnityObjectToWorldNormal(v.normal);
+                o.uv = v.uv * _TextureScale;
                 o.color = v.color;
-                
-                // Fog
                 UNITY_TRANSFER_FOG(o, o.vertex);
-                
                 return o;
             }
 
             fixed4 frag (v2f i) : SV_Target
             {
-                // Decode material ID from vertex color (red channel)
-                int materialID = (int)(i.color.r * 255);
+                // Decode vertex color data
+                int materialID = (int)(i.color.r * 255.0);
+                float voxelLight = i.color.g; // Pre-calculated light level for this voxel
                 
-                fixed4 col;
-                
-                // Select texture based on material ID
+                // Select base texture
+                fixed4 texColor;
                 if (materialID == 1) // Floor
                 {
-                    col = tex2D(_FloorTex, i.uv);
+                    texColor = tex2D(_FloorTex, i.uv);
                 }
                 else if (materialID == 2) // Ceiling
                 {
-                    col = tex2D(_CeilingTex, i.uv);
+                    texColor = tex2D(_CeilingTex, i.uv);
+                }
+                else if (materialID == 3) // Light source
+                {
+                    texColor = fixed4(1, 1, 0.9, 1); // Warm white for light sources
                 }
                 else // Wall (default or materialID == 0)
                 {
-                    col = tex2D(_WallTex, i.uv);
+                    texColor = tex2D(_WallTex, i.uv);
                 }
                 
-                // Simple directional lighting based on normals
-                float3 lightDir = normalize(float3(0.3, 1, 0.2)); // Directional light
-                float NdotL = max(dot(normalize(i.normal), lightDir), 0);
-                float lighting = _AmbientLight + (1 - _AmbientLight) * NdotL;
+                // Minecraft-style lighting: ambient + voxel light
+                float totalLight = _Ambient + voxelLight * _MaxLight;
+                totalLight = saturate(totalLight);
                 
-                col.rgb *= lighting;
+                // Apply lighting
+                fixed4 finalColor = texColor;
+                finalColor.rgb *= totalLight;
                 
-                // Apply fog
-                UNITY_APPLY_FOG(i.fogCoord, col);
+                // Light sources glow
+                if (materialID == 3)
+                {
+                    // Bright glow for light sources
+                    finalColor.rgb = texColor.rgb * 2.0;
+                    
+                    // Subtle flicker
+                    float flicker = sin(_Time.y * 3.0 + i.uv.x * 5.0) * 0.05 + 0.95;
+                    finalColor.rgb *= flicker;
+                }
                 
-                return col;
+                // Fog
+                UNITY_APPLY_FOG(i.fogCoord, finalColor);
+                
+                return finalColor;
             }
             ENDCG
         }

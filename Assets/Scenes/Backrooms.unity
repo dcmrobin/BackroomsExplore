@@ -164,6 +164,10 @@ MonoBehaviour:
   minCorridorHeight: 3
   maxCorridorHeight: 5
   variableCorridorSize: 1
+  lightPlacementChance: 0.2
+  minLightsPerRoom: 1
+  maxLightsPerRoom: 3
+  lightDecay: 0.15
   dungeonMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
   wallTexture: {fileID: 2800000, guid: 6bcef0c6484ac5245836712142922d9b, type: 3}
   floorTexture: {fileID: 2800000, guid: ce13917434694114eb5b9ec59b4ea94e, type: 3}

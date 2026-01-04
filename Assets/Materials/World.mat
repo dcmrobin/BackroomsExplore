@@ -51,6 +51,14 @@ Material:
         m_Texture: {fileID: 2800000, guid: ce13917434694114eb5b9ec59b4ea94e, type: 3}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
+    - _LightData:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _LightTex:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     - _MainTex:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
@@ -73,25 +81,38 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
+    - _AOStrength: 0.5
+    - _Ambient: 0.3
     - _AmbientLight: 0.3
     - _BumpScale: 1
     - _Cutoff: 0.5
     - _DetailNormalMapScale: 1
+    - _Directional: 0.5
     - _DstBlend: 0
     - _GlossMapScale: 1
     - _Glossiness: 0
     - _GlossyReflections: 1
+    - _LightCount: 0
+    - _LightIntensity: 1
+    - _LightRange: 8
     - _Metallic: 0
     - _Mode: 0
     - _OcclusionStrength: 1
     - _Parallax: 0.02
+    - _ShowLights: 0
+    - _SmoothShading: 0.3
     - _SmoothnessTextureChannel: 0
     - _SpecularHighlights: 1
     - _SrcBlend: 1
     - _UVSec: 0
     - _ZWrite: 1
     m_Colors:
+    - _AmbientColor: {r: 0.3, g: 0.3, b: 0.3, a: 1}
     - _Color: {r: 0.5471698, g: 0.528479, b: 0.40521538, a: 1}
+    - _Direction: {r: 0.3, g: 1, b: 0.2, a: 0}
+    - _DirectionalColor: {r: 0.8, g: 0.8, b: 0.7, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
+    - _LightColor: {r: 1, g: 1, b: 1, a: 1}
+    - _LightDirection: {r: 0.3, g: -0.8, b: 0.2, a: 0}
     - _TextureScale: {r: 1, g: 1, b: 0, a: 0}
   m_BuildTextureStacks: []
