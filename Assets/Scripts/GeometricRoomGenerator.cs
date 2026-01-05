@@ -53,6 +53,7 @@ public class GeometricRoomGenerator : MonoBehaviour
     private HashSet<Vector3Int> lightPositionSet = new HashSet<Vector3Int>();
     private MeshFilter meshFilter;
     private MeshRenderer meshRenderer;
+    private MeshCollider meshCollider;
     
     // Material IDs
     private const byte MATERIAL_WALL = 0;
@@ -278,6 +279,7 @@ public class GeometricRoomGenerator : MonoBehaviour
         
         if (meshFilter == null) meshFilter = gameObject.AddComponent<MeshFilter>();
         if (meshRenderer == null) meshRenderer = gameObject.AddComponent<MeshRenderer>();
+        if (meshCollider == null) meshCollider = gameObject.AddComponent<MeshCollider>();
         
         if (dungeonMaterial != null)
         {
@@ -983,6 +985,7 @@ public class GeometricRoomGenerator : MonoBehaviour
         mesh.Optimize();
         
         meshFilter.mesh = mesh;
+        meshCollider.sharedMesh = mesh;
         
         Debug.Log($"Generated mesh: {vertices.Count} vertices, {triangles.Count/3} triangles, {lightPositions.Count} lights");
     }
