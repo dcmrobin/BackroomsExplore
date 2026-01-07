@@ -1,6 +1,5 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System.Collections.Concurrent;
 
 public class InfiniteChunkManager : MonoBehaviour
 {
@@ -18,7 +17,7 @@ public class InfiniteChunkManager : MonoBehaviour
     [SerializeField] private Transform playerTransform;
     [SerializeField] private Material chunkMaterial;
     
-    private ChunkRoomGenerator roomGenerator;
+    private CrossChunkRoomGenerator roomGenerator;
     
     // Chunk storage
     private Dictionary<Vector3Int, DungeonChunk> loadedChunks = new Dictionary<Vector3Int, DungeonChunk>();
@@ -95,9 +94,12 @@ public class InfiniteChunkManager : MonoBehaviour
             else playerTransform = Camera.main?.transform;
         }
         
-        roomGenerator = GetComponent<ChunkRoomGenerator>();
+        roomGenerator = GetComponent<CrossChunkRoomGenerator>();
         if (roomGenerator == null)
-            roomGenerator = gameObject.AddComponent<ChunkRoomGenerator>();
+            roomGenerator = gameObject.AddComponent<CrossChunkRoomGenerator>();
+        
+        // Initialize the generator with chunk size
+        roomGenerator.Initialize(chunkSize);
         
         chunkContainer = new GameObject("Chunks").transform;
         chunkContainer.SetParent(transform);
@@ -135,13 +137,6 @@ public class InfiniteChunkManager : MonoBehaviour
     
     private void UpdateGenerationQueue()
     {
-        // Clear any jobs that are now too far away
-        if (cancelDistantGeneration)
-        {
-            List<ChunkGenerationJob> jobsToRemove = new List<ChunkGenerationJob>();
-            // We'll handle this in ProcessGenerationQueue
-        }
-        
         // Add new chunks to generate
         for (int x = -renderDistance; x <= renderDistance; x++)
         {
@@ -371,9 +366,5 @@ public class InfiniteChunkManager : MonoBehaviour
         Gizmos.color = Color.red;
         Vector3 playerChunkCenter = ChunkCoordToWorld(currentPlayerChunkCoord) + (Vector3)chunkSize * 0.5f;
         Gizmos.DrawWireCube(playerChunkCenter, chunkSize);
-        
-        // Draw chunks in generation queue
-        Gizmos.color = new Color(1, 0.5f, 0, 0.5f);
-        // (Would need to expose generationQueue items)
     }
 }

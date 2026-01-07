@@ -11,7 +11,6 @@ GameObject:
   - component: {fileID: 5304483167836589877}
   - component: {fileID: 7088493295685261955}
   - component: {fileID: 3993240864670331233}
-  - component: {fileID: 45028789638942447}
   m_Layer: 0
   m_Name: ChunkPrefab
   m_TagString: Untagged
@@ -46,6 +45,17 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e0f35900027322a42b234de097668e8d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  lightPlacementChance: 0.2
+  minLightsPerRoom: 1
+  maxLightsPerRoom: 3
+  lightDecay: 0.15
+  lightPropagationSteps: 15
+  lightSourceIntensity: 1
+  smoothLighting: 1
+  wallTexture: {fileID: 2800000, guid: 6bcef0c6484ac5245836712142922d9b, type: 3}
+  floorTexture: {fileID: 2800000, guid: ce13917434694114eb5b9ec59b4ea94e, type: 3}
+  ceilingTexture: {fileID: 2800000, guid: f24038d14e65a1847989e5effdb77f9e, type: 3}
+  textureScale: {x: 1, y: 1}
 --- !u!23 &3993240864670331233
 MeshRenderer:
   m_ObjectHideFlags: 0
@@ -88,21 +98,3 @@ MeshRenderer:
   m_SortingLayer: 0
   m_SortingOrder: 0
   m_AdditionalVertexStreams: {fileID: 0}
---- !u!114 &45028789638942447
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 4771283657701135733}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 7c060a94c6346f842949a6a62766f24c, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  wallTexture: {fileID: 2800000, guid: 6bcef0c6484ac5245836712142922d9b, type: 3}
-  floorTexture: {fileID: 2800000, guid: ce13917434694114eb5b9ec59b4ea94e, type: 3}
-  ceilingTexture: {fileID: 2800000, guid: f24038d14e65a1847989e5effdb77f9e, type: 3}
-  ambientLight: 0.15
-  maxLight: 1
-  textureScale: {x: 1, y: 1}
