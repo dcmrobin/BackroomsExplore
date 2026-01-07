@@ -27,17 +27,13 @@ public class DungeonChunk : MonoBehaviour
     {
         voxelGrid = grid;
         
-        var meshData = GenerateMeshWithRoomShells();
+        var meshData = GenerateSimpleMesh();
         ApplyMesh(meshData);
     }
     
-    private MeshData GenerateMeshWithRoomShells()
+    private MeshData GenerateSimpleMesh()
     {
         MeshData meshData = new MeshData();
-        
-        // First pass: Mark which voxels are room shells vs interiors
-        bool[,,] isRoomShell = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
-        bool[,,] isRoomInterior = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
         
         for (int x = 0; x < chunkSize.x; x++)
         {
@@ -47,10 +43,10 @@ public class DungeonChunk : MonoBehaviour
                 {
                     if (voxelGrid[x, y, z])
                     {
-                        // A voxel is part of a room SHELL if:
-                        // 1. It's on the edge of a solid region (has at least one empty neighbor)
-                        // 2. OR it's completely surrounded but we want to render it anyway (for corridors)
+                        Vector3 offset = new Vector3(x, y, z);
                         
+                        // Check neighbors - only render faces where neighbor is EMPTY
+                        // This automatically creates hollow rooms!
                         bool leftEmpty = x == 0 || !voxelGrid[x - 1, y, z];
                         bool rightEmpty = x == chunkSize.x - 1 || !voxelGrid[x + 1, y, z];
                         bool bottomEmpty = y == 0 || !voxelGrid[x, y - 1, z];
@@ -58,67 +54,23 @@ public class DungeonChunk : MonoBehaviour
                         bool frontEmpty = z == 0 || !voxelGrid[x, y, z - 1];
                         bool backEmpty = z == chunkSize.z - 1 || !voxelGrid[x, y, z + 1];
                         
-                        // Check if this is on the surface of a solid region
-                        isRoomShell[x, y, z] = leftEmpty || rightEmpty || bottomEmpty || topEmpty || frontEmpty || backEmpty;
+                        // Determine material type
+                        byte materialID = 0; // Default wall
                         
-                        // Check if this is interior (completely surrounded by solid)
-                        isRoomInterior[x, y, z] = !leftEmpty && !rightEmpty && !bottomEmpty && !topEmpty && !frontEmpty && !backEmpty;
-                    }
-                }
-            }
-        }
-        
-        // Second pass: Generate mesh only for shell voxels
-        for (int x = 0; x < chunkSize.x; x++)
-        {
-            for (int y = 0; y < chunkSize.y; y++)
-            {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    if (voxelGrid[x, y, z] && isRoomShell[x, y, z])
-                    {
-                        Vector3 offset = new Vector3(x, y, z);
+                        // Floor check: solid with empty above
+                        if (bottomEmpty || (y > 0 && !voxelGrid[x, y - 1, z]))
+                            materialID = 1; // Floor
+                        // Ceiling check: solid with empty below  
+                        else if (topEmpty || (y < chunkSize.y - 1 && !voxelGrid[x, y + 1, z]))
+                            materialID = 2; // Ceiling
                         
-                        // Determine material
-                        byte materialID = DetermineMaterialID(x, y, z, isRoomInterior[x, y, z]);
-                        
-                        // Check neighbors - only render faces where neighbor is EMPTY or not part of shell
-                        bool leftSolid = x > 0 && voxelGrid[x - 1, y, z];
-                        bool rightSolid = x < chunkSize.x - 1 && voxelGrid[x + 1, y, z];
-                        bool bottomSolid = y > 0 && voxelGrid[x, y - 1, z];
-                        bool topSolid = y < chunkSize.y - 1 && voxelGrid[x, y + 1, z];
-                        bool frontSolid = z > 0 && voxelGrid[x, y, z - 1];
-                        bool backSolid = z < chunkSize.z - 1 && voxelGrid[x, y, z + 1];
-                        
-                        // For room interiors: INVERT the face check
-                        // Render faces where neighbor is ALSO part of the shell (creating inward faces)
-                        if (isRoomInterior[x, y, z])
-                        {
-                            // Special case: interior voxel that should still render inward faces
-                            // Check if neighbor is also interior but we want a face between them
-                            if (leftSolid && isRoomInterior[x - 1, y, z]) 
-                                AddFace(meshData, offset, FaceDirection.Left, materialID, true);
-                            if (rightSolid && isRoomInterior[x + 1, y, z]) 
-                                AddFace(meshData, offset, FaceDirection.Right, materialID, true);
-                            if (bottomSolid && isRoomInterior[x, y - 1, z]) 
-                                AddFace(meshData, offset, FaceDirection.Bottom, materialID, true);
-                            if (topSolid && isRoomInterior[x, y + 1, z]) 
-                                AddFace(meshData, offset, FaceDirection.Top, materialID, true);
-                            if (frontSolid && isRoomInterior[x, y, z - 1]) 
-                                AddFace(meshData, offset, FaceDirection.Front, materialID, true);
-                            if (backSolid && isRoomInterior[x, y, z + 1]) 
-                                AddFace(meshData, offset, FaceDirection.Back, materialID, true);
-                        }
-                        else
-                        {
-                            // Normal exterior faces - render where neighbor is empty
-                            if (!leftSolid) AddFace(meshData, offset, FaceDirection.Left, materialID, false);
-                            if (!rightSolid) AddFace(meshData, offset, FaceDirection.Right, materialID, false);
-                            if (!bottomSolid) AddFace(meshData, offset, FaceDirection.Bottom, materialID, false);
-                            if (!topSolid) AddFace(meshData, offset, FaceDirection.Top, materialID, false);
-                            if (!frontSolid) AddFace(meshData, offset, FaceDirection.Front, materialID, false);
-                            if (!backSolid) AddFace(meshData, offset, FaceDirection.Back, materialID, false);
-                        }
+                        // Add faces where neighbor is empty
+                        if (leftEmpty) AddFace(meshData, offset, FaceDirection.Left, materialID);
+                        if (rightEmpty) AddFace(meshData, offset, FaceDirection.Right, materialID);
+                        if (bottomEmpty) AddFace(meshData, offset, FaceDirection.Bottom, materialID);
+                        if (topEmpty) AddFace(meshData, offset, FaceDirection.Top, materialID);
+                        if (frontEmpty) AddFace(meshData, offset, FaceDirection.Front, materialID);
+                        if (backEmpty) AddFace(meshData, offset, FaceDirection.Back, materialID);
                     }
                 }
             }
@@ -127,30 +79,9 @@ public class DungeonChunk : MonoBehaviour
         return meshData;
     }
     
-    private byte DetermineMaterialID(int x, int y, int z, bool isInterior)
-    {
-        if (isInterior)
-        {
-            // Interior walls - use wall material
-            return 0;
-        }
-        
-        // Check if this is likely a floor (solid with empty above)
-        if (y < chunkSize.y - 1 && !voxelGrid[x, y + 1, z])
-            return 1; // Floor
-        
-        // Check if this is likely a ceiling (solid with empty below)
-        if (y > 0 && !voxelGrid[x, y - 1, z])
-            return 2; // Ceiling
-        
-        // Default to wall
-        return 0;
-    }
-    
     private enum FaceDirection { Left, Right, Bottom, Top, Front, Back }
     
-    private void AddFace(MeshData meshData, Vector3 offset, FaceDirection direction, 
-                        byte materialID, bool invertNormals)
+    private void AddFace(MeshData meshData, Vector3 offset, FaceDirection direction, byte materialID)
     {
         int baseIndex = meshData.vertices.Count;
         
@@ -217,33 +148,19 @@ public class DungeonChunk : MonoBehaviour
             meshData.vertices.Add(vertex + offset);
         }
         
-        // Add triangles with proper winding for normals
-        if (!invertNormals)
-        {
-            // Outward-facing normals (CCW winding)
-            meshData.triangles.Add(baseIndex);
-            meshData.triangles.Add(baseIndex + 1);
-            meshData.triangles.Add(baseIndex + 2);
-            meshData.triangles.Add(baseIndex + 2);
-            meshData.triangles.Add(baseIndex + 3);
-            meshData.triangles.Add(baseIndex);
-        }
-        else
-        {
-            // Inward-facing normals (CW winding)
-            meshData.triangles.Add(baseIndex);
-            meshData.triangles.Add(baseIndex + 3);
-            meshData.triangles.Add(baseIndex + 2);
-            meshData.triangles.Add(baseIndex + 2);
-            meshData.triangles.Add(baseIndex + 1);
-            meshData.triangles.Add(baseIndex);
-        }
+        // Add triangles (CCW winding for outward normals)
+        meshData.triangles.Add(baseIndex);
+        meshData.triangles.Add(baseIndex + 1);
+        meshData.triangles.Add(baseIndex + 2);
+        meshData.triangles.Add(baseIndex + 2);
+        meshData.triangles.Add(baseIndex + 3);
+        meshData.triangles.Add(baseIndex);
         
         // Add UVs
         meshData.uv.AddRange(uvs);
         
         // Add colors (material ID in R, light level in G)
-        float lightLevel = CalculateLightLevel(offset + new Vector3(0.5f, 0.5f, 0.5f), invertNormals);
+        float lightLevel = CalculateLightLevel(offset + new Vector3(0.5f, 0.5f, 0.5f));
         Color vertexColor = new Color(materialID / 3f, lightLevel, 0, 1);
         
         for (int i = 0; i < 4; i++)
@@ -252,19 +169,17 @@ public class DungeonChunk : MonoBehaviour
         }
     }
     
-    private float CalculateLightLevel(Vector3 position, bool isInteriorFace)
+    private float CalculateLightLevel(Vector3 position)
     {
-        if (isInteriorFace)
-        {
-            // Room interiors are darker
-            return 0.3f;
-        }
-        
         // Simple lighting: darker near bottom, lighter near top
         float heightFactor = position.y / chunkSize.y;
         float baseLight = 0.2f + heightFactor * 0.6f;
         
-        return Mathf.Clamp01(baseLight);
+        // Darken corners slightly
+        float cornerFactor = 1f - (Mathf.Abs(position.x - chunkSize.x/2f) / (chunkSize.x/2f) * 
+                                  Mathf.Abs(position.z - chunkSize.z/2f) / (chunkSize.z/2f)) * 0.3f;
+        
+        return Mathf.Clamp01(baseLight * cornerFactor);
     }
     
     private void ApplyMesh(MeshData meshData)
@@ -286,7 +201,7 @@ public class DungeonChunk : MonoBehaviour
         mesh.uv = meshData.uv.ToArray();
         mesh.colors = meshData.colors.ToArray();
         
-        // Don't recalculate normals - we handle them via winding order
+        mesh.RecalculateNormals();
         mesh.RecalculateBounds();
         
         meshFilter.mesh = mesh;
