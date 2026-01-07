@@ -164,7 +164,7 @@ public class ChunkRoomGenerator : MonoBehaviour
         
         public void CarveIntoGrid(bool[,,] grid, Vector3Int chunkOffset, Vector3Int chunkSize)
         {
-            // Convert path cells to local chunk coordinates
+            // Convert world cells to local chunk coordinates
             foreach (var worldCell in pathCells)
             {
                 Vector3Int localCell = worldCell - chunkOffset;
@@ -174,16 +174,24 @@ public class ChunkRoomGenerator : MonoBehaviour
                     localCell.y < 0 || localCell.y >= chunkSize.y ||
                     localCell.z < 0 || localCell.z >= chunkSize.z)
                     continue;
-                
-                // Determine if this segment is horizontal
+                    
+                // Find if this segment is horizontal
                 int cellIndex = pathCells.IndexOf(worldCell);
-                bool isHorizontal = (cellIndex > 0 && Mathf.Abs(pathCells[cellIndex].x - pathCells[cellIndex-1].x) > 0) || 
-                                   (cellIndex < pathCells.Count - 1 && Mathf.Abs(pathCells[cellIndex+1].x - pathCells[cellIndex].x) > 0);
+                bool isHorizontal = false;
+                
+                if (cellIndex > 0)
+                {
+                    isHorizontal = Mathf.Abs(pathCells[cellIndex].x - pathCells[cellIndex-1].x) > 0;
+                }
+                else if (cellIndex < pathCells.Count - 1)
+                {
+                    isHorizontal = Mathf.Abs(pathCells[cellIndex+1].x - pathCells[cellIndex].x) > 0;
+                }
                 
                 int halfWidth = width / 2;
                 int startY = localCell.y - height / 2;
                 
-                // Carve corridor (make it SOLID - exactly like original)
+                // Carve SOLID corridor
                 if (isHorizontal)
                 {
                     for (int dx = -1; dx <= 1; dx++)
@@ -200,7 +208,7 @@ public class ChunkRoomGenerator : MonoBehaviour
                                 
                                 if (IsInGrid(corridorCell, grid, chunkSize))
                                 {
-                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
+                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true; // SOLID
                                 }
                             }
                         }
@@ -222,7 +230,7 @@ public class ChunkRoomGenerator : MonoBehaviour
                                 
                                 if (IsInGrid(corridorCell, grid, chunkSize))
                                 {
-                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
+                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true; // SOLID
                                 }
                             }
                         }
@@ -266,20 +274,20 @@ public class ChunkRoomGenerator : MonoBehaviour
     {
         Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
         
-        // Step 1: Generate noise for this chunk (using world coordinates for consistency)
+        // Step 1: Generate noise for this chunk
         bool[,,] noiseGrid = GenerateNoiseForChunk(chunkCoord, chunkSize);
         noiseGridsByChunk[chunkCoord] = noiseGrid;
         
         // Step 2: Find rooms in this chunk
         List<CuboidRoom> newRooms = FindCubicRoomsInChunk(chunkCoord, chunkSize, noiseGrid);
         
-        // Step 3: Register rooms (for cross-chunk awareness)
+        // Step 3: Register rooms
         foreach (var room in newRooms)
         {
             RegisterRoom(room, chunkSize);
         }
         
-        // Step 4: Get ALL rooms that affect this chunk (including from neighbors)
+        // Step 4: Get ALL rooms that affect this chunk
         List<CuboidRoom> allRelevantRooms = GetAllRoomsAffectingChunk(chunkCoord, chunkSize);
         
         // Step 5: Clear final grid and carve rooms
@@ -289,20 +297,102 @@ public class ChunkRoomGenerator : MonoBehaviour
             room.CarveIntoGrid(finalGrid, worldOffset, chunkSize);
         }
         
-        // Step 6: Get corridors that affect this chunk
-        List<Corridor> relevantCorridors = GetCorridorsAffectingChunk(chunkCoord, chunkSize);
+        // Step 6: Connect rooms with corridors
+        ConnectRoomsWithCorridors(chunkCoord, chunkSize, allRelevantRooms);
         
-        // Step 7: Carve corridors
+        // Step 7: Get and carve corridors that affect this chunk
+        List<Corridor> relevantCorridors = GetCorridorsAffectingChunk(chunkCoord, chunkSize);
         foreach (var corridor in relevantCorridors)
         {
-            corridor.CarveIntoGrid(finalGrid, worldOffset, chunkSize);
+            CarveCorridorIntoGrid(corridor, worldOffset, chunkSize, ref finalGrid);
         }
         
-        // Step 8: Connect rooms (minimum spanning tree - like original)
-        ConnectRoomsWithCorridors(chunkCoord, chunkSize, allRelevantRooms);
-
-        // Step 9: Create vertical connections
+        // Step 8: Create vertical connections
         CreateVerticalConnections(chunkCoord, chunkSize, allRelevantRooms, ref finalGrid);
+    }
+
+    private void CarveCorridorIntoGrid(Corridor corridor, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] finalGrid)
+    {
+        foreach (var worldCell in corridor.pathCells)
+        {
+            Vector3Int localCell = worldCell - worldOffset;
+            
+            // Skip if not in this chunk
+            if (localCell.x < 0 || localCell.x >= chunkSize.x ||
+                localCell.y < 0 || localCell.y >= chunkSize.y ||
+                localCell.z < 0 || localCell.z >= chunkSize.z)
+                continue;
+            
+            // Find the index of this cell in the path
+            int cellIndex = corridor.pathCells.IndexOf(worldCell);
+            bool isHorizontal = false;
+            
+            // Determine if this segment is horizontal
+            if (cellIndex > 0)
+            {
+                isHorizontal = Mathf.Abs(corridor.pathCells[cellIndex].x - corridor.pathCells[cellIndex - 1].x) > 0;
+            }
+            else if (cellIndex < corridor.pathCells.Count - 1)
+            {
+                isHorizontal = Mathf.Abs(corridor.pathCells[cellIndex + 1].x - corridor.pathCells[cellIndex].x) > 0;
+            }
+            
+            int halfWidth = corridor.width / 2;
+            int startY = localCell.y - corridor.height / 2;
+            
+            // Carve corridor as SOLID (just like rooms!)
+            if (isHorizontal)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dz = -halfWidth; dz <= halfWidth; dz++)
+                    {
+                        for (int dy = 0; dy < corridor.height; dy++)
+                        {
+                            Vector3Int corridorCell = new Vector3Int(
+                                localCell.x + dx,
+                                startY + dy,
+                                localCell.z + dz
+                            );
+                            
+                            if (IsInGrid(corridorCell, finalGrid, chunkSize))
+                            {
+                                finalGrid[corridorCell.x, corridorCell.y, corridorCell.z] = true; // SOLID
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    for (int dx = -halfWidth; dx <= halfWidth; dx++)
+                    {
+                        for (int dy = 0; dy < corridor.height; dy++)
+                        {
+                            Vector3Int corridorCell = new Vector3Int(
+                                localCell.x + dx,
+                                startY + dy,
+                                localCell.z + dz
+                            );
+                            
+                            if (IsInGrid(corridorCell, finalGrid, chunkSize))
+                            {
+                                finalGrid[corridorCell.x, corridorCell.y, corridorCell.z] = true; // SOLID
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private bool IsInGrid(Vector3Int pos, bool[,,] grid, Vector3Int chunkSize)
+    {
+        return pos.x >= 0 && pos.x < chunkSize.x &&
+            pos.y >= 0 && pos.y < chunkSize.y &&
+            pos.z >= 0 && pos.z < chunkSize.z;
     }
     
     private bool[,,] GenerateNoiseForChunk(Vector3Int chunkCoord, Vector3Int chunkSize)
@@ -765,10 +855,10 @@ public class ChunkRoomGenerator : MonoBehaviour
     {
         Vector3Int localPos = worldPos - worldOffset;
         int stairHeight = Random.Range(minStairHeight, maxStairHeight + 1);
-        int stairWidth = 2;
-        int stairDepth = 2;
+        int stairWidth = 3;
+        int stairDepth = 3;
         
-        // Create ascending staircase
+        // Create SOLID ascending staircase
         for (int step = 0; step < stairHeight; step++)
         {
             for (int x = 0; x < stairWidth; x++)
@@ -776,21 +866,40 @@ public class ChunkRoomGenerator : MonoBehaviour
                 for (int z = 0; z < stairDepth; z++)
                 {
                     int voxelX = localPos.x + x;
-                    int voxelY = localPos.y + step; // Each step is one voxel higher
+                    int voxelY = localPos.y + step;
                     int voxelZ = localPos.z + z;
                     
                     if (voxelX >= 0 && voxelX < chunkSize.x &&
                         voxelY >= 0 && voxelY < chunkSize.y &&
                         voxelZ >= 0 && voxelZ < chunkSize.z)
                     {
-                        finalGrid[voxelX, voxelY, voxelZ] = true; // Solid step
+                        finalGrid[voxelX, voxelY, voxelZ] = true; // SOLID step
                     }
                 }
             }
         }
         
-        // Also create the staircase going upward into the chunk above
-        // This would need to be handled by the chunk above
+        // Create SOLID landing at top of stairs
+        int landingHeight = stairHeight;
+        for (int x = 0; x < stairWidth; x++)
+        {
+            for (int z = 0; z < stairDepth; z++)
+            {
+                for (int y = landingHeight; y < landingHeight + 2; y++) // 2-voxel high landing
+                {
+                    int voxelX = localPos.x + x;
+                    int voxelY = localPos.y + y;
+                    int voxelZ = localPos.z + z;
+                    
+                    if (voxelX >= 0 && voxelX < chunkSize.x &&
+                        voxelY >= 0 && voxelY < chunkSize.y &&
+                        voxelZ >= 0 && voxelZ < chunkSize.z)
+                    {
+                        finalGrid[voxelX, voxelY, voxelZ] = true; // SOLID landing
+                    }
+                }
+            }
+        }
     }
     
     private void GenerateLinePath(Vector3Int start, Vector3Int end, List<Vector3Int> path)
