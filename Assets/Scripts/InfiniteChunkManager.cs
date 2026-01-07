@@ -1,11 +1,10 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System.Collections.Concurrent;
 
 public class InfiniteChunkManager : MonoBehaviour
 {
     [Header("Chunk Settings")]
-    public Vector3Int chunkSize = new Vector3Int(80, 40, 80); // Match original size
+    public Vector3Int chunkSize = new Vector3Int(80, 40, 80); // Same as original grid size
     [SerializeField] private int renderDistance = 3;
     [SerializeField] private bool useObjectPooling = true;
     
@@ -14,25 +13,17 @@ public class InfiniteChunkManager : MonoBehaviour
     [SerializeField] private Transform playerTransform;
     [SerializeField] private Material chunkMaterial;
     
-    private RoomAndCorridorGenerator roomGenerator;
+    private ChunkRoomGenerator roomGenerator;
     
     // Chunk storage
     private Dictionary<Vector3Int, DungeonChunk> loadedChunks = new Dictionary<Vector3Int, DungeonChunk>();
-    private Dictionary<Vector3Int, ChunkData> chunkDataCache = new Dictionary<Vector3Int, ChunkData>();
+    private Dictionary<Vector3Int, bool[,,]> chunkVoxelCache = new Dictionary<Vector3Int, bool[,,]>();
     private Queue<DungeonChunk> chunkPool = new Queue<DungeonChunk>();
     private Transform chunkContainer;
     
     // State
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
-    private ConcurrentQueue<Vector3Int> chunksToGenerate = new ConcurrentQueue<Vector3Int>();
-    private HashSet<Vector3Int> generatingChunks = new HashSet<Vector3Int>();
-    
-    private class ChunkData
-    {
-        public bool[,,] voxelGrid;
-        public bool[,,] noiseGrid;
-        public bool isGenerated = false;
-    }
+    private List<Vector3Int> chunksToGenerate = new List<Vector3Int>();
     
     void Start()
     {
@@ -43,9 +34,9 @@ public class InfiniteChunkManager : MonoBehaviour
             else playerTransform = Camera.main?.transform;
         }
         
-        roomGenerator = GetComponent<RoomAndCorridorGenerator>();
+        roomGenerator = GetComponent<ChunkRoomGenerator>();
         if (roomGenerator == null)
-            roomGenerator = gameObject.AddComponent<RoomAndCorridorGenerator>();
+            roomGenerator = gameObject.AddComponent<ChunkRoomGenerator>();
         
         chunkContainer = new GameObject("Chunks").transform;
         chunkContainer.SetParent(transform);
@@ -120,10 +111,9 @@ public class InfiniteChunkManager : MonoBehaviour
                     Vector3Int chunkCoord = currentPlayerChunkCoord + new Vector3Int(x, y, z);
                     
                     if (!loadedChunks.ContainsKey(chunkCoord) && 
-                        !generatingChunks.Contains(chunkCoord))
+                        !chunksToGenerate.Contains(chunkCoord))
                     {
-                        chunksToGenerate.Enqueue(chunkCoord);
-                        generatingChunks.Add(chunkCoord);
+                        chunksToGenerate.Add(chunkCoord);
                     }
                 }
             }
@@ -134,12 +124,11 @@ public class InfiniteChunkManager : MonoBehaviour
     {
         if (chunksToGenerate.Count == 0) return;
         
-        // Generate up to 1 chunk per frame (room generation is heavier)
-        if (chunksToGenerate.TryDequeue(out Vector3Int chunkCoord))
-        {
-            GenerateChunkImmediate(chunkCoord);
-            generatingChunks.Remove(chunkCoord);
-        }
+        // Generate one chunk per frame (room generation is heavy)
+        Vector3Int chunkCoord = chunksToGenerate[0];
+        chunksToGenerate.RemoveAt(0);
+        
+        GenerateChunkImmediate(chunkCoord);
     }
     
     private void GenerateChunkImmediate(Vector3Int chunkCoord)
@@ -160,60 +149,18 @@ public class InfiniteChunkManager : MonoBehaviour
         }
         
         // Generate or retrieve chunk data
-        if (!chunkDataCache.TryGetValue(chunkCoord, out ChunkData data))
+        if (!chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
         {
-            data = new ChunkData();
-            GenerateChunkWithRooms(chunkCoord, data);
-            chunkDataCache[chunkCoord] = data;
+            voxelGrid = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
+            roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelGrid);
+            chunkVoxelCache[chunkCoord] = voxelGrid;
         }
         
         // Generate mesh
         chunk.Initialize(chunkSize);
-        chunk.GenerateMesh(data.voxelGrid);
+        chunk.GenerateMesh(voxelGrid);
         
         loadedChunks[chunkCoord] = chunk;
-    }
-    
-    private void GenerateChunkWithRooms(Vector3Int chunkCoord, ChunkData chunkData)
-    {
-        // Get neighbor noise data for continuity
-        Dictionary<Vector3Int, bool[,,]> neighborNoiseGrids = GetNeighborNoiseGrids(chunkCoord);
-        
-        // Let the room generator handle everything
-        roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref chunkData.voxelGrid, neighborNoiseGrids);
-        chunkData.isGenerated = true;
-        
-        // Debug info
-        int solidCount = 0;
-        for (int x = 0; x < chunkSize.x; x++)
-            for (int y = 0; y < chunkSize.y; y++)
-                for (int z = 0; z < chunkSize.z; z++)
-                    if (chunkData.voxelGrid[x, y, z]) solidCount++;
-        
-        Debug.Log($"Chunk {chunkCoord}: {solidCount} solid voxels, {roomGenerator.GetRoomsAffectingChunk(chunkCoord).Count} rooms");
-    }
-
-    private Dictionary<Vector3Int, bool[,,]> GetNeighborNoiseGrids(Vector3Int chunkCoord)
-    {
-        var neighborNoiseGrids = new Dictionary<Vector3Int, bool[,,]>();
-        
-        // Check adjacent chunks for their noise data
-        Vector3Int[] neighborOffsets = {
-            new Vector3Int(-1, 0, 0), new Vector3Int(1, 0, 0),
-            new Vector3Int(0, -1, 0), new Vector3Int(0, 1, 0),
-            new Vector3Int(0, 0, -1), new Vector3Int(0, 0, 1)
-        };
-        
-        foreach (var offset in neighborOffsets)
-        {
-            Vector3Int neighborCoord = chunkCoord + offset;
-            if (chunkDataCache.TryGetValue(neighborCoord, out ChunkData neighborData))
-            {
-                neighborNoiseGrids[offset] = neighborData.noiseGrid;
-            }
-        }
-        
-        return neighborNoiseGrids;
     }
     
     private int GetChunkDistance(Vector3Int a, Vector3Int b)
@@ -234,6 +181,7 @@ public class InfiniteChunkManager : MonoBehaviour
             
             // Clear generator data for this chunk
             roomGenerator.ClearChunkData(chunkCoord);
+            chunkVoxelCache.Remove(chunkCoord);
         }
     }
     
@@ -261,11 +209,8 @@ public class InfiniteChunkManager : MonoBehaviour
             for (int z = -1; z <= 1; z++)
             {
                 Vector3Int coord = new Vector3Int(x, 0, z);
-                if (!generatingChunks.Contains(coord))
-                {
-                    chunksToGenerate.Enqueue(coord);
-                    generatingChunks.Add(coord);
-                }
+                if (!chunksToGenerate.Contains(coord))
+                    chunksToGenerate.Add(coord);
             }
         }
     }
@@ -298,34 +243,4 @@ public class InfiniteChunkManager : MonoBehaviour
             Destroy(chunk.gameObject);
         }
     }
-    
-    /*void OnDrawGizmosSelected()
-    {
-        if (!Application.isPlaying) return;
-        
-        // Draw loaded chunks
-        Gizmos.color = new Color(0, 1, 0, 0.3f);
-        foreach (var kvp in loadedChunks)
-        {
-            Vector3 center = ChunkCoordToWorld(kvp.Key) + (Vector3)chunkSize * 0.5f;
-            Gizmos.DrawWireCube(center, chunkSize);
-        }
-        
-        // Draw player chunk
-        Gizmos.color = Color.red;
-        Vector3 playerChunkCenter = ChunkCoordToWorld(currentPlayerChunkCoord) + (Vector3)chunkSize * 0.5f;
-        Gizmos.DrawWireCube(playerChunkCenter, chunkSize);
-        
-        // Draw rooms (optional - can be heavy)
-        if (roomGenerator != null)
-        {
-            Gizmos.color = new Color(1, 0.5f, 0, 0.4f);
-            var rooms = roomGenerator.GetRoomsInChunk(currentPlayerChunkCoord);
-            foreach (var room in rooms)
-            {
-                Vector3 worldCenter = ChunkCoordToWorld(room.chunkCoord) + room.LocalBounds.center;
-                Gizmos.DrawWireCube(worldCenter, room.LocalBounds.size);
-            }
-        }
-    }*/
 }

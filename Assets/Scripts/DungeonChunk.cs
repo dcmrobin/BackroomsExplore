@@ -10,6 +10,12 @@ public class DungeonChunk : MonoBehaviour
     private bool[,,] voxelGrid;
     private Vector3Int chunkSize;
     
+    // Material IDs (must match shader)
+    private const byte MATERIAL_WALL = 0;
+    private const byte MATERIAL_FLOOR = 1;
+    private const byte MATERIAL_CEILING = 2;
+    private const byte MATERIAL_LIGHT = 3;
+    
     public void Initialize(Vector3Int size)
     {
         chunkSize = size;
@@ -27,14 +33,16 @@ public class DungeonChunk : MonoBehaviour
     {
         voxelGrid = grid;
         
-        var meshData = GenerateSimpleMesh();
+        // EXACT SAME MESH GENERATION AS ORIGINAL (but per-chunk)
+        var meshData = GenerateLitMesh();
         ApplyMesh(meshData);
     }
     
-    private MeshData GenerateSimpleMesh()
+    private MeshData GenerateLitMesh()
     {
         MeshData meshData = new MeshData();
         
+        // Generate mesh with lighting data (simplified - no lighting for now)
         for (int x = 0; x < chunkSize.x; x++)
         {
             for (int y = 0; y < chunkSize.y; y++)
@@ -43,34 +51,7 @@ public class DungeonChunk : MonoBehaviour
                 {
                     if (voxelGrid[x, y, z])
                     {
-                        Vector3 offset = new Vector3(x, y, z);
-                        
-                        // Check neighbors - only render faces where neighbor is EMPTY
-                        // This automatically creates hollow rooms!
-                        bool leftEmpty = x == 0 || !voxelGrid[x - 1, y, z];
-                        bool rightEmpty = x == chunkSize.x - 1 || !voxelGrid[x + 1, y, z];
-                        bool bottomEmpty = y == 0 || !voxelGrid[x, y - 1, z];
-                        bool topEmpty = y == chunkSize.y - 1 || !voxelGrid[x, y + 1, z];
-                        bool frontEmpty = z == 0 || !voxelGrid[x, y, z - 1];
-                        bool backEmpty = z == chunkSize.z - 1 || !voxelGrid[x, y, z + 1];
-                        
-                        // Determine material type
-                        byte materialID = 0; // Default wall
-                        
-                        // Floor check: solid with empty above
-                        if (bottomEmpty || (y > 0 && !voxelGrid[x, y - 1, z]))
-                            materialID = 1; // Floor
-                        // Ceiling check: solid with empty below  
-                        else if (topEmpty || (y < chunkSize.y - 1 && !voxelGrid[x, y + 1, z]))
-                            materialID = 2; // Ceiling
-                        
-                        // Add faces where neighbor is empty
-                        if (leftEmpty) AddFace(meshData, offset, FaceDirection.Left, materialID);
-                        if (rightEmpty) AddFace(meshData, offset, FaceDirection.Right, materialID);
-                        if (bottomEmpty) AddFace(meshData, offset, FaceDirection.Bottom, materialID);
-                        if (topEmpty) AddFace(meshData, offset, FaceDirection.Top, materialID);
-                        if (frontEmpty) AddFace(meshData, offset, FaceDirection.Front, materialID);
-                        if (backEmpty) AddFace(meshData, offset, FaceDirection.Back, materialID);
+                        AddFacesWithData(x, y, z, meshData);
                     }
                 }
             }
@@ -79,76 +60,78 @@ public class DungeonChunk : MonoBehaviour
         return meshData;
     }
     
-    private enum FaceDirection { Left, Right, Bottom, Top, Front, Back }
+    private void AddFacesWithData(int x, int y, int z, MeshData meshData)
+    {
+        Vector3 offset = new Vector3(x, y, z);
+        
+        // EXACT SAME FACE CHECKING AS ORIGINAL
+        // LEFT FACE
+        if (x == 0 || !voxelGrid[x - 1, y, z])
+        {
+            byte materialID = MATERIAL_WALL;
+            AddFace(offset, 
+                new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
+                meshData, materialID, false);
+        }
+        
+        // RIGHT FACE
+        if (x == chunkSize.x - 1 || !voxelGrid[x + 1, y, z])
+        {
+            byte materialID = MATERIAL_WALL;
+            AddFace(offset, 
+                new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
+                meshData, materialID, false);
+        }
+        
+        // BOTTOM FACE - FLOOR
+        if (y == 0 || !voxelGrid[x, y - 1, z])
+        {
+            byte materialID = MATERIAL_FLOOR;
+            AddFace(offset, 
+                new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
+                meshData, materialID, true);
+        }
+        
+        // TOP FACE - CEILING
+        if (y == chunkSize.y - 1 || !voxelGrid[x, y + 1, z])
+        {
+            byte materialID = MATERIAL_CEILING;
+            AddFace(offset, 
+                new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
+                meshData, materialID, true);
+        }
+        
+        // FRONT FACE
+        if (z == 0 || !voxelGrid[x, y, z - 1])
+        {
+            byte materialID = MATERIAL_WALL;
+            AddFace(offset, 
+                new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
+                meshData, materialID, false);
+        }
+        
+        // BACK FACE
+        if (z == chunkSize.z - 1 || !voxelGrid[x, y, z + 1])
+        {
+            byte materialID = MATERIAL_WALL;
+            AddFace(offset, 
+                new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
+                meshData, materialID, false);
+        }
+    }
     
-    private void AddFace(MeshData meshData, Vector3 offset, FaceDirection direction, byte materialID)
+    private void AddFace(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3,
+                        MeshData meshData, byte materialID, bool isHorizontal)
     {
         int baseIndex = meshData.vertices.Count;
         
-        Vector3[] vertices;
-        Vector2[] uvs;
-        
-        switch (direction)
-        {
-            case FaceDirection.Left:
-                vertices = new Vector3[] {
-                    new Vector3(0,0,0), new Vector3(0,1,0), 
-                    new Vector3(0,1,1), new Vector3(0,0,1)
-                };
-                uvs = new Vector2[] { new Vector2(0,0), new Vector2(0,1), new Vector2(1,1), new Vector2(1,0) };
-                break;
-                
-            case FaceDirection.Right:
-                vertices = new Vector3[] {
-                    new Vector3(1,0,1), new Vector3(1,1,1), 
-                    new Vector3(1,1,0), new Vector3(1,0,0)
-                };
-                uvs = new Vector2[] { new Vector2(0,0), new Vector2(0,1), new Vector2(1,1), new Vector2(1,0) };
-                break;
-                
-            case FaceDirection.Bottom:
-                vertices = new Vector3[] {
-                    new Vector3(0,0,1), new Vector3(1,0,1), 
-                    new Vector3(1,0,0), new Vector3(0,0,0)
-                };
-                uvs = new Vector2[] { new Vector2(0,0), new Vector2(1,0), new Vector2(1,1), new Vector2(0,1) };
-                break;
-                
-            case FaceDirection.Top:
-                vertices = new Vector3[] {
-                    new Vector3(0,1,0), new Vector3(1,1,0), 
-                    new Vector3(1,1,1), new Vector3(0,1,1)
-                };
-                uvs = new Vector2[] { new Vector2(0,0), new Vector2(1,0), new Vector2(1,1), new Vector2(0,1) };
-                break;
-                
-            case FaceDirection.Front:
-                vertices = new Vector3[] {
-                    new Vector3(0,0,0), new Vector3(1,0,0), 
-                    new Vector3(1,1,0), new Vector3(0,1,0)
-                };
-                uvs = new Vector2[] { new Vector2(0,0), new Vector2(1,0), new Vector2(1,1), new Vector2(0,1) };
-                break;
-                
-            case FaceDirection.Back:
-                vertices = new Vector3[] {
-                    new Vector3(1,0,1), new Vector3(0,0,1), 
-                    new Vector3(0,1,1), new Vector3(1,1,1)
-                };
-                uvs = new Vector2[] { new Vector2(0,0), new Vector2(1,0), new Vector2(1,1), new Vector2(0,1) };
-                break;
-                
-            default:
-                return;
-        }
-        
         // Add vertices
-        foreach (var vertex in vertices)
-        {
-            meshData.vertices.Add(vertex + offset);
-        }
+        meshData.vertices.Add(v0 + offset);
+        meshData.vertices.Add(v1 + offset);
+        meshData.vertices.Add(v2 + offset);
+        meshData.vertices.Add(v3 + offset);
         
-        // Add triangles (CCW winding for outward normals)
+        // Add triangles (same winding as original)
         meshData.triangles.Add(baseIndex);
         meshData.triangles.Add(baseIndex + 1);
         meshData.triangles.Add(baseIndex + 2);
@@ -156,11 +139,32 @@ public class DungeonChunk : MonoBehaviour
         meshData.triangles.Add(baseIndex + 3);
         meshData.triangles.Add(baseIndex);
         
-        // Add UVs
-        meshData.uv.AddRange(uvs);
+        // Add UVs (simplified - no texture scaling for now)
+        float width = 1f;
+        float height = 1f;
+        
+        if (isHorizontal)
+        {
+            width = Vector3.Distance(v0, v3);
+            height = Vector3.Distance(v0, v1);
+            meshData.uv.Add(new Vector2(0, 0));
+            meshData.uv.Add(new Vector2(0, height));
+            meshData.uv.Add(new Vector2(width, height));
+            meshData.uv.Add(new Vector2(width, 0));
+        }
+        else
+        {
+            width = Vector3.Distance(v0, v1);
+            height = Vector3.Distance(v0, v3);
+            meshData.uv.Add(new Vector2(0, 0));
+            meshData.uv.Add(new Vector2(0, height));
+            meshData.uv.Add(new Vector2(width, height));
+            meshData.uv.Add(new Vector2(width, 0));
+        }
         
         // Add colors (material ID in R, light level in G)
-        float lightLevel = CalculateLightLevel(offset + new Vector3(0.5f, 0.5f, 0.5f));
+        // For now, use constant lighting - add proper lighting later
+        float lightLevel = 0.7f;
         Color vertexColor = new Color(materialID / 3f, lightLevel, 0, 1);
         
         for (int i = 0; i < 4; i++)
@@ -169,25 +173,12 @@ public class DungeonChunk : MonoBehaviour
         }
     }
     
-    private float CalculateLightLevel(Vector3 position)
-    {
-        // Simple lighting: darker near bottom, lighter near top
-        float heightFactor = position.y / chunkSize.y;
-        float baseLight = 0.2f + heightFactor * 0.6f;
-        
-        // Darken corners slightly
-        float cornerFactor = 1f - (Mathf.Abs(position.x - chunkSize.x/2f) / (chunkSize.x/2f) * 
-                                  Mathf.Abs(position.z - chunkSize.z/2f) / (chunkSize.z/2f)) * 0.3f;
-        
-        return Mathf.Clamp01(baseLight * cornerFactor);
-    }
-    
     private void ApplyMesh(MeshData meshData)
     {
         if (meshData.vertices.Count == 0)
         {
-            if (meshFilter != null) meshFilter.mesh = null;
-            if (meshCollider != null) meshCollider.sharedMesh = null;
+            meshFilter.mesh = null;
+            meshCollider.sharedMesh = null;
             return;
         }
         
@@ -203,20 +194,10 @@ public class DungeonChunk : MonoBehaviour
         
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
+        mesh.Optimize();
         
         meshFilter.mesh = mesh;
         meshCollider.sharedMesh = mesh;
-    }
-    
-    public bool GetVoxel(Vector3Int localPos)
-    {
-        if (localPos.x >= 0 && localPos.x < chunkSize.x &&
-            localPos.y >= 0 && localPos.y < chunkSize.y &&
-            localPos.z >= 0 && localPos.z < chunkSize.z)
-        {
-            return voxelGrid[localPos.x, localPos.y, localPos.z];
-        }
-        return false;
     }
     
     public void Clear()
