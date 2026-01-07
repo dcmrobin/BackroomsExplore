@@ -139,7 +139,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &1367147926
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -285,9 +285,87 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1882148088
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1882148090}
+  - component: {fileID: 1882148089}
+  - component: {fileID: 1882148091}
+  m_Layer: 0
+  m_Name: DungeonManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1882148089
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1882148088}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a846c99c3bf674c40ae13258884a40fd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  chunkSize: {x: 32, y: 16, z: 32}
+  renderDistance: 3
+  useObjectPooling: 1
+  chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
+  playerTransform: {fileID: 1585999911}
+  chunkMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
+  roomGenerator: {fileID: 1882148091}
+--- !u!4 &1882148090
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1882148088}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1882148091
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1882148088}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 22251ba5f91e0d940a944f7640209e11, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  minRoomSize: 6
+  maxRoomSize: 16
+  minRoomHeight: 4
+  maxRoomHeight: 8
+  roomDensity: 0.4
+  roomPlacementAttempts: 20
+  minCorridorWidth: 2
+  maxCorridorWidth: 4
+  corridorHeight: 3
+  corridorTurnRadius: 2
+  floorHeight: 16
+  maxFloors: 3
+  staircaseChance: 0.3
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
   m_Roots:
   - {fileID: 1585999911}
   - {fileID: 1367147927}
+  - {fileID: 1882148090}
