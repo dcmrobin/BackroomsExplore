@@ -18,6 +18,11 @@ public class ChunkRoomGenerator : MonoBehaviour
     [SerializeField] private int minCorridorHeight = 3;
     [SerializeField] private int maxCorridorHeight = 5;
     [SerializeField] private bool variableCorridorSize = true;
+
+    [Header("Vertical Connections")]
+    [SerializeField] private float verticalConnectionChance = 0.2f;
+    [SerializeField] private int minStairHeight = 4;
+    [SerializeField] private int maxStairHeight = 8;
     
     [Header("Generation Optimization")]
     [SerializeField] private int scanStep = 2;
@@ -295,6 +300,9 @@ public class ChunkRoomGenerator : MonoBehaviour
         
         // Step 8: Connect rooms (minimum spanning tree - like original)
         ConnectRoomsWithCorridors(chunkCoord, chunkSize, allRelevantRooms);
+
+        // Step 9: Create vertical connections
+        CreateVerticalConnections(chunkCoord, chunkSize, allRelevantRooms, ref finalGrid);
     }
     
     private bool[,,] GenerateNoiseForChunk(Vector3Int chunkCoord, Vector3Int chunkSize)
@@ -608,9 +616,35 @@ public class ChunkRoomGenerator : MonoBehaviour
         if (!corridorsByChunk.ContainsKey(chunkCoord))
             corridorsByChunk[chunkCoord] = new List<Corridor>();
         
-        // Minimum Spanning Tree (same as original)
+        // Get ALL rooms that could potentially connect (including from adjacent chunks)
+        List<CuboidRoom> allConnectableRooms = new List<CuboidRoom>();
+        
+        // Check this chunk and immediate neighbors for rooms
+        Vector3Int[] neighborOffsets = {
+            Vector3Int.zero, // Current chunk
+            Vector3Int.left, Vector3Int.right,
+            Vector3Int.down, Vector3Int.up,
+            Vector3Int.back, Vector3Int.forward
+        };
+        
+        foreach (var offset in neighborOffsets)
+        {
+            Vector3Int checkCoord = chunkCoord + offset;
+            if (roomsByChunk.ContainsKey(checkCoord))
+            {
+                foreach (var room in roomsByChunk[checkCoord])
+                {
+                    if (!allConnectableRooms.Contains(room))
+                        allConnectableRooms.Add(room);
+                }
+            }
+        }
+        
+        if (allConnectableRooms.Count < 2) return;
+        
+        // Minimum Spanning Tree
         List<CuboidRoom> connected = new List<CuboidRoom>();
-        List<CuboidRoom> unconnected = new List<CuboidRoom>(rooms);
+        List<CuboidRoom> unconnected = new List<CuboidRoom>(allConnectableRooms);
         
         connected.Add(unconnected[0]);
         unconnected.RemoveAt(0);
@@ -637,20 +671,22 @@ public class ChunkRoomGenerator : MonoBehaviour
             
             if (closestRoom != null && closestConnected != null)
             {
-                Corridor corridor = CreateCorridorBetween(closestConnected, closestRoom, chunkSize);
-                if (corridor != null)
+                // Only create corridor if rooms aren't already connected
+                if (!AreRoomsConnected(closestConnected, closestRoom))
                 {
-                    corridorsByChunk[chunkCoord].Add(corridor);
-                    
-                    // Register corridor in all affected chunks
-                    List<Vector3Int> affectedChunks = corridor.GetAffectedChunks(chunkSize);
-                    foreach (var affectedChunk in affectedChunks)
+                    Corridor corridor = CreateCorridorBetween(closestConnected, closestRoom, chunkSize);
+                    if (corridor != null)
                     {
-                        if (!corridorsByChunk.ContainsKey(affectedChunk))
-                            corridorsByChunk[affectedChunk] = new List<Corridor>();
-                        
-                        if (!corridorsByChunk[affectedChunk].Contains(corridor))
-                            corridorsByChunk[affectedChunk].Add(corridor);
+                        // Register corridor in all affected chunks
+                        List<Vector3Int> affectedChunks = corridor.GetAffectedChunks(chunkSize);
+                        foreach (var affectedChunk in affectedChunks)
+                        {
+                            if (!corridorsByChunk.ContainsKey(affectedChunk))
+                                corridorsByChunk[affectedChunk] = new List<Corridor>();
+                            
+                            if (!corridorsByChunk[affectedChunk].Contains(corridor))
+                                corridorsByChunk[affectedChunk].Add(corridor);
+                        }
                     }
                 }
                 
@@ -660,7 +696,7 @@ public class ChunkRoomGenerator : MonoBehaviour
         }
         
         // Add extra corridors (same as original)
-        AddExtraCorridors(chunkCoord, chunkSize, rooms);
+        AddExtraCorridors(chunkCoord, chunkSize, allConnectableRooms);
     }
     
     private Corridor CreateCorridorBetween(CuboidRoom roomA, CuboidRoom roomB, Vector3Int chunkSize)
@@ -699,6 +735,63 @@ public class ChunkRoomGenerator : MonoBehaviour
         
         return corridor;
     }
+
+    private void CreateVerticalConnections(Vector3Int chunkCoord, Vector3Int chunkSize, List<CuboidRoom> rooms, ref bool[,,] finalGrid)
+    {
+        if (rooms.Count == 0) return;
+        
+        Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
+        
+        foreach (var room in rooms)
+        {
+            // Chance to create vertical connection
+            if (Random.value < verticalConnectionChance)
+            {
+                // Create staircase in a corner of the room
+                Vector3Int staircaseBase = room.minBounds + new Vector3Int(2, 0, 2);
+                
+                // Check if this position is within current chunk
+                Vector3Int localPos = staircaseBase - worldOffset;
+                if (localPos.x >= 0 && localPos.x < chunkSize.x &&
+                    localPos.z >= 0 && localPos.z < chunkSize.z)
+                {
+                    CreateStaircase(staircaseBase, chunkSize, worldOffset, ref finalGrid);
+                }
+            }
+        }
+    }
+
+    private void CreateStaircase(Vector3Int worldPos, Vector3Int chunkSize, Vector3Int worldOffset, ref bool[,,] finalGrid)
+    {
+        Vector3Int localPos = worldPos - worldOffset;
+        int stairHeight = Random.Range(minStairHeight, maxStairHeight + 1);
+        int stairWidth = 2;
+        int stairDepth = 2;
+        
+        // Create ascending staircase
+        for (int step = 0; step < stairHeight; step++)
+        {
+            for (int x = 0; x < stairWidth; x++)
+            {
+                for (int z = 0; z < stairDepth; z++)
+                {
+                    int voxelX = localPos.x + x;
+                    int voxelY = localPos.y + step; // Each step is one voxel higher
+                    int voxelZ = localPos.z + z;
+                    
+                    if (voxelX >= 0 && voxelX < chunkSize.x &&
+                        voxelY >= 0 && voxelY < chunkSize.y &&
+                        voxelZ >= 0 && voxelZ < chunkSize.z)
+                    {
+                        finalGrid[voxelX, voxelY, voxelZ] = true; // Solid step
+                    }
+                }
+            }
+        }
+        
+        // Also create the staircase going upward into the chunk above
+        // This would need to be handled by the chunk above
+    }
     
     private void GenerateLinePath(Vector3Int start, Vector3Int end, List<Vector3Int> path)
     {
@@ -730,7 +823,7 @@ public class ChunkRoomGenerator : MonoBehaviour
             CuboidRoom roomA = rooms[Random.Range(0, rooms.Count)];
             CuboidRoom roomB = rooms[Random.Range(0, rooms.Count)];
             
-            if (roomA != roomB && !AreRoomsConnected(roomA, roomB, chunkCoord))
+            if (roomA != roomB && !AreRoomsConnected(roomA, roomB/*, chunkCoord*/))
             {
                 Corridor corridor = CreateCorridorBetween(roomA, roomB, chunkSize);
                 if (corridor != null)
@@ -752,16 +845,18 @@ public class ChunkRoomGenerator : MonoBehaviour
         }
     }
     
-    private bool AreRoomsConnected(CuboidRoom roomA, CuboidRoom roomB, Vector3Int chunkCoord)
+    private bool AreRoomsConnected(CuboidRoom roomA, CuboidRoom roomB)
     {
-        if (!corridorsByChunk.ContainsKey(chunkCoord)) return false;
-        
-        foreach (Corridor corridor in corridorsByChunk[chunkCoord])
+        // Check all chunks that might have a corridor connecting these rooms
+        foreach (var chunk in corridorsByChunk.Keys)
         {
-            if ((corridor.roomA == roomA && corridor.roomB == roomB) ||
-                (corridor.roomA == roomB && corridor.roomB == roomA))
+            foreach (Corridor corridor in corridorsByChunk[chunk])
             {
-                return true;
+                if ((corridor.roomA == roomA && corridor.roomB == roomB) ||
+                    (corridor.roomA == roomB && corridor.roomB == roomA))
+                {
+                    return true;
+                }
             }
         }
         return false;
