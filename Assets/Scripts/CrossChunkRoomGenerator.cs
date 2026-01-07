@@ -34,14 +34,13 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     private Dictionary<int, Corridor> allCorridors = new Dictionary<int, Corridor>();
     private Dictionary<Vector3Int, HashSet<int>> chunkToRooms = new Dictionary<Vector3Int, HashSet<int>>();
     private Dictionary<Vector3Int, HashSet<int>> chunkToCorridors = new Dictionary<Vector3Int, HashSet<int>>();
-    private Dictionary<Vector3Int, bool[,,]> noiseGridsByChunk = new Dictionary<Vector3Int, bool[,,]>();
+    private Dictionary<Vector3Int, bool[,,]> voxelGridsByChunk = new Dictionary<Vector3Int, bool[,,]>();
     private HashSet<Vector3Int> processedChunks = new HashSet<Vector3Int>();
     
     private int nextRoomId = 0;
     private int nextCorridorId = 0;
     private Vector3Int currentChunkSize;
     
-    // Same classes as before but modified for global scope
     private class CuboidRoom
     {
         public int id;
@@ -64,58 +63,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             return !(maxBounds.x < other.minBounds.x || minBounds.x > other.maxBounds.x ||
                      maxBounds.y < other.minBounds.y || minBounds.y > other.maxBounds.y ||
                      maxBounds.z < other.minBounds.z || minBounds.z > other.maxBounds.z);
-        }
-        
-        public void CarveIntoGrid(bool[,,] grid, Vector3Int chunkOffset, Vector3Int chunkSize)
-        {
-            Vector3Int localMin = minBounds - chunkOffset;
-            Vector3Int localMax = maxBounds - chunkOffset;
-            
-            localMin = Vector3Int.Max(localMin, Vector3Int.zero);
-            localMax = Vector3Int.Min(localMax, chunkSize - Vector3Int.one);
-            
-            for (int x = localMin.x; x <= localMax.x; x++)
-            {
-                for (int y = localMin.y; y <= localMax.y; y++)
-                {
-                    for (int z = localMin.z; z <= localMax.z; z++)
-                    {
-                        if (x >= 0 && x < grid.GetLength(0) &&
-                            y >= 0 && y < grid.GetLength(1) &&
-                            z >= 0 && z < grid.GetLength(2))
-                        {
-                            grid[x, y, z] = true;
-                        }
-                    }
-                }
-            }
-        }
-        
-        public Vector3Int GetClosestSurfacePoint(Vector3Int target)
-        {
-            Vector3Int closest = center;
-            float closestDist = Vector3Int.Distance(center, target);
-            
-            Vector3Int[] faceCenters = {
-                new Vector3Int(minBounds.x, center.y, center.z),
-                new Vector3Int(maxBounds.x, center.y, center.z),
-                new Vector3Int(center.x, minBounds.y, center.z),
-                new Vector3Int(center.x, maxBounds.y, center.z),
-                new Vector3Int(center.x, center.y, minBounds.z),
-                new Vector3Int(center.x, center.y, maxBounds.z)
-            };
-            
-            foreach (var faceCenter in faceCenters)
-            {
-                float dist = Vector3Int.Distance(faceCenter, target);
-                if (dist < closestDist)
-                {
-                    closestDist = dist;
-                    closest = faceCenter;
-                }
-            }
-            
-            return closest;
         }
         
         public List<Vector3Int> GetOccupiedChunks(Vector3Int chunkSize)
@@ -160,86 +107,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         public int height;
         public List<Vector3Int> pathCells = new List<Vector3Int>();
         
-        public void CarveIntoGrid(bool[,,] grid, Vector3Int chunkOffset, Vector3Int chunkSize)
-        {
-            foreach (var worldCell in pathCells)
-            {
-                Vector3Int localCell = worldCell - chunkOffset;
-                
-                if (localCell.x < 0 || localCell.x >= chunkSize.x ||
-                    localCell.y < 0 || localCell.y >= chunkSize.y ||
-                    localCell.z < 0 || localCell.z >= chunkSize.z)
-                    continue;
-                    
-                int cellIndex = pathCells.IndexOf(worldCell);
-                bool isHorizontal = false;
-                
-                if (cellIndex > 0)
-                {
-                    isHorizontal = Mathf.Abs(pathCells[cellIndex].x - pathCells[cellIndex-1].x) > 0;
-                }
-                else if (cellIndex < pathCells.Count - 1)
-                {
-                    isHorizontal = Mathf.Abs(pathCells[cellIndex+1].x - pathCells[cellIndex].x) > 0;
-                }
-                
-                int halfWidth = width / 2;
-                int startY = localCell.y - height / 2;
-                
-                if (isHorizontal)
-                {
-                    for (int dx = -1; dx <= 1; dx++)
-                    {
-                        for (int dz = -halfWidth; dz <= halfWidth; dz++)
-                        {
-                            for (int dy = 0; dy < height; dy++)
-                            {
-                                Vector3Int corridorCell = new Vector3Int(
-                                    localCell.x + dx,
-                                    startY + dy,
-                                    localCell.z + dz
-                                );
-                                
-                                if (IsInGrid(corridorCell, grid, chunkSize))
-                                {
-                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    for (int dz = -1; dz <= 1; dz++)
-                    {
-                        for (int dx = -halfWidth; dx <= halfWidth; dx++)
-                        {
-                            for (int dy = 0; dy < height; dy++)
-                            {
-                                Vector3Int corridorCell = new Vector3Int(
-                                    localCell.x + dx,
-                                    startY + dy,
-                                    localCell.z + dz
-                                );
-                                
-                                if (IsInGrid(corridorCell, grid, chunkSize))
-                                {
-                                    grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        private bool IsInGrid(Vector3Int pos, bool[,,] grid, Vector3Int chunkSize)
-        {
-            return pos.x >= 0 && pos.x < chunkSize.x &&
-                   pos.y >= 0 && pos.y < chunkSize.y &&
-                   pos.z >= 0 && pos.z < chunkSize.z;
-        }
-        
         public List<Vector3Int> GetAffectedChunks(Vector3Int chunkSize)
         {
             List<Vector3Int> chunks = new List<Vector3Int>();
@@ -271,7 +138,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         allCorridors.Clear();
         chunkToRooms.Clear();
         chunkToCorridors.Clear();
-        noiseGridsByChunk.Clear();
+        voxelGridsByChunk.Clear();
         processedChunks.Clear();
         nextRoomId = 0;
         nextCorridorId = 0;
@@ -284,7 +151,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         
         // Step 1: Generate noise for this chunk
         bool[,,] noiseGrid = GenerateNoiseForChunk(chunkCoord, chunkSize);
-        noiseGridsByChunk[chunkCoord] = noiseGrid;
         
         // Step 2: Find rooms in this chunk (only if not already processed)
         if (!processedChunks.Contains(chunkCoord))
@@ -308,18 +174,275 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         ClearGrid(ref finalGrid, chunkSize);
         foreach (var room in allRelevantRooms)
         {
-            room.CarveIntoGrid(finalGrid, worldOffset, chunkSize);
+            CarveRoomIntoGrid(room, worldOffset, chunkSize, ref finalGrid);
         }
         
         // Step 6: Get and carve corridors that affect this chunk
         List<Corridor> relevantCorridors = GetCorridorsForChunk(chunkCoord, chunkSize);
         foreach (var corridor in relevantCorridors)
         {
-            corridor.CarveIntoGrid(finalGrid, worldOffset, chunkSize);
+            CarveCorridorIntoGrid(corridor, worldOffset, chunkSize, ref finalGrid);
         }
         
         // Step 7: Create vertical connections
         CreateVerticalConnections(chunkCoord, chunkSize, allRelevantRooms, worldOffset, ref finalGrid);
+        
+        // Step 8: CRITICAL - Check neighboring chunks to remove boundary walls
+        RemoveBoundaryWalls(chunkCoord, chunkSize, ref finalGrid);
+        
+        // Store the final voxel grid for boundary checking
+        voxelGridsByChunk[chunkCoord] = (bool[,,])finalGrid.Clone();
+    }
+    
+    // NEW: This is the key fix - remove walls at chunk boundaries
+    private void RemoveBoundaryWalls(Vector3Int chunkCoord, Vector3Int chunkSize, ref bool[,,] finalGrid)
+    {
+        Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
+        
+        // Check all 6 directions
+        Vector3Int[] neighborDirections = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+        
+        foreach (var direction in neighborDirections)
+        {
+            Vector3Int neighborCoord = chunkCoord + direction;
+            
+            // If we have the neighbor's voxel data, check for openings
+            if (voxelGridsByChunk.TryGetValue(neighborCoord, out bool[,,] neighborGrid))
+            {
+                Vector3Int neighborOffset = Vector3Int.Scale(neighborCoord, chunkSize);
+                
+                // Determine which face we're checking
+                if (direction == Vector3Int.right) // +X face
+                {
+                    int boundaryX = chunkSize.x - 1;
+                    for (int y = 0; y < chunkSize.y; y++)
+                    {
+                        for (int z = 0; z < chunkSize.z; z++)
+                        {
+                            // If this voxel is solid and touches the boundary
+                            if (finalGrid[boundaryX, y, z])
+                            {
+                                // Check the corresponding voxel in the neighbor
+                                if (neighborGrid[0, y, z])
+                                {
+                                    // Both are solid - check if we should create an opening
+                                    // (We'll remove this boundary voxel if it's part of a corridor or room that continues)
+                                    bool shouldBeOpen = CheckIfShouldBeOpen(new Vector3Int(boundaryX, y, z), worldOffset, 
+                                                                           new Vector3Int(0, y, z), neighborOffset);
+                                    if (shouldBeOpen)
+                                    {
+                                        finalGrid[boundaryX, y, z] = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (direction == Vector3Int.left) // -X face
+                {
+                    int boundaryX = 0;
+                    for (int y = 0; y < chunkSize.y; y++)
+                    {
+                        for (int z = 0; z < chunkSize.z; z++)
+                        {
+                            if (finalGrid[boundaryX, y, z])
+                            {
+                                if (neighborGrid[chunkSize.x - 1, y, z])
+                                {
+                                    bool shouldBeOpen = CheckIfShouldBeOpen(new Vector3Int(boundaryX, y, z), worldOffset,
+                                                                           new Vector3Int(chunkSize.x - 1, y, z), neighborOffset);
+                                    if (shouldBeOpen)
+                                    {
+                                        finalGrid[boundaryX, y, z] = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (direction == Vector3Int.forward) // +Z face
+                {
+                    int boundaryZ = chunkSize.z - 1;
+                    for (int x = 0; x < chunkSize.x; x++)
+                    {
+                        for (int y = 0; y < chunkSize.y; y++)
+                        {
+                            if (finalGrid[x, y, boundaryZ])
+                            {
+                                if (neighborGrid[x, y, 0])
+                                {
+                                    bool shouldBeOpen = CheckIfShouldBeOpen(new Vector3Int(x, y, boundaryZ), worldOffset,
+                                                                           new Vector3Int(x, y, 0), neighborOffset);
+                                    if (shouldBeOpen)
+                                    {
+                                        finalGrid[x, y, boundaryZ] = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (direction == Vector3Int.back) // -Z face
+                {
+                    int boundaryZ = 0;
+                    for (int x = 0; x < chunkSize.x; x++)
+                    {
+                        for (int y = 0; y < chunkSize.y; y++)
+                        {
+                            if (finalGrid[x, y, boundaryZ])
+                            {
+                                if (neighborGrid[x, y, chunkSize.z - 1])
+                                {
+                                    bool shouldBeOpen = CheckIfShouldBeOpen(new Vector3Int(x, y, boundaryZ), worldOffset,
+                                                                           new Vector3Int(x, y, chunkSize.z - 1), neighborOffset);
+                                    if (shouldBeOpen)
+                                    {
+                                        finalGrid[x, y, boundaryZ] = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Similar for Y directions if needed
+            }
+        }
+    }
+    
+    private bool CheckIfShouldBeOpen(Vector3Int localPos, Vector3Int worldOffset, 
+                                    Vector3Int neighborLocalPos, Vector3Int neighborWorldOffset)
+    {
+        // Convert to world positions
+        Vector3Int worldPos = localPos + worldOffset;
+        Vector3Int neighborWorldPos = neighborLocalPos + neighborWorldOffset;
+        
+        // Check if these positions are part of any corridor
+        foreach (var corridor in allCorridors.Values)
+        {
+            // Check if either position is on the corridor path
+            bool thisPosInCorridor = corridor.pathCells.Contains(worldPos);
+            bool neighborPosInCorridor = corridor.pathCells.Contains(neighborWorldPos);
+            
+            // If both positions are in the same corridor, they should be connected
+            if (thisPosInCorridor && neighborPosInCorridor)
+            {
+                return true;
+            }
+        }
+        
+        // Check if these positions are part of rooms that should connect
+        // (You could add room connection logic here if needed)
+        
+        return false;
+    }
+    
+    private void CarveRoomIntoGrid(CuboidRoom room, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
+    {
+        Vector3Int localMin = room.minBounds - worldOffset;
+        Vector3Int localMax = room.maxBounds - worldOffset;
+        
+        localMin = Vector3Int.Max(localMin, Vector3Int.zero);
+        localMax = Vector3Int.Min(localMax, chunkSize - Vector3Int.one);
+        
+        for (int x = localMin.x; x <= localMax.x; x++)
+        {
+            for (int y = localMin.y; y <= localMax.y; y++)
+            {
+                for (int z = localMin.z; z <= localMax.z; z++)
+                {
+                    if (x >= 0 && x < grid.GetLength(0) &&
+                        y >= 0 && y < grid.GetLength(1) &&
+                        z >= 0 && z < grid.GetLength(2))
+                    {
+                        grid[x, y, z] = true;
+                    }
+                }
+            }
+        }
+    }
+    
+    private void CarveCorridorIntoGrid(Corridor corridor, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
+    {
+        foreach (var worldCell in corridor.pathCells)
+        {
+            Vector3Int localCell = worldCell - worldOffset;
+            
+            if (localCell.x < 0 || localCell.x >= chunkSize.x ||
+                localCell.y < 0 || localCell.y >= chunkSize.y ||
+                localCell.z < 0 || localCell.z >= chunkSize.z)
+                continue;
+                
+            int cellIndex = corridor.pathCells.IndexOf(worldCell);
+            bool isHorizontal = false;
+            
+            if (cellIndex > 0)
+            {
+                isHorizontal = Mathf.Abs(corridor.pathCells[cellIndex].x - corridor.pathCells[cellIndex-1].x) > 0;
+            }
+            else if (cellIndex < corridor.pathCells.Count - 1)
+            {
+                isHorizontal = Mathf.Abs(corridor.pathCells[cellIndex+1].x - corridor.pathCells[cellIndex].x) > 0;
+            }
+            
+            int halfWidth = corridor.width / 2;
+            int startY = localCell.y - corridor.height / 2;
+            
+            if (isHorizontal)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dz = -halfWidth; dz <= halfWidth; dz++)
+                    {
+                        for (int dy = 0; dy < corridor.height; dy++)
+                        {
+                            Vector3Int corridorCell = new Vector3Int(
+                                localCell.x + dx,
+                                startY + dy,
+                                localCell.z + dz
+                            );
+                            
+                            if (IsInGrid(corridorCell, grid, chunkSize))
+                            {
+                                grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    for (int dx = -halfWidth; dx <= halfWidth; dx++)
+                    {
+                        for (int dy = 0; dy < corridor.height; dy++)
+                        {
+                            Vector3Int corridorCell = new Vector3Int(
+                                localCell.x + dx,
+                                startY + dy,
+                                localCell.z + dz
+                            );
+                            
+                            if (IsInGrid(corridorCell, grid, chunkSize))
+                            {
+                                grid[corridorCell.x, corridorCell.y, corridorCell.z] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private bool IsInGrid(Vector3Int pos, bool[,,] grid, Vector3Int chunkSize)
+    {
+        return pos.x >= 0 && pos.x < chunkSize.x &&
+               pos.y >= 0 && pos.y < chunkSize.y &&
+               pos.z >= 0 && pos.z < chunkSize.z;
     }
     
     private bool[,,] GenerateNoiseForChunk(Vector3Int chunkCoord, Vector3Int chunkSize)
@@ -429,7 +552,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                         CuboidRoom room = FindBestCuboidAt(x, y, z, occupied, noiseGrid, chunkSize, worldOffset);
                         if (room != null && room.size.x >= minRoomSize && room.size.y >= minRoomSize && room.size.z >= minRoomSize)
                         {
-                            // Check if room overlaps with any existing room
                             bool overlaps = false;
                             foreach (var existingRoom in allRooms.Values)
                             {
@@ -501,7 +623,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                     bestVolume = volume;
                     Vector3Int worldMin = new Vector3Int(localX, localY, localZ) + worldOffset;
                     Vector3Int worldMax = worldMin + new Vector3Int(sizeX - 1, sizeY - 1, sizeZ - 1);
-                    bestRoom = new CuboidRoom(-1, worldMin, worldMax); // ID will be set later
+                    bestRoom = new CuboidRoom(-1, worldMin, worldMax);
                 }
             }
         }
@@ -580,13 +702,10 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 chunkToRooms[chunkCoord] = new HashSet<int>();
             chunkToRooms[chunkCoord].Add(room.id);
         }
-        
-        Debug.Log($"Registered room {room.id} at {room.minBounds} to {room.maxBounds} in {occupiedChunks.Count} chunks");
     }
     
     private void ConnectAllRoomsInArea(Vector3Int centerChunk, Vector3Int chunkSize)
     {
-        // Get all rooms in a certain radius around this chunk
         List<CuboidRoom> roomsInArea = new List<CuboidRoom>();
         
         for (int dx = -maxChunkRangeForConnections; dx <= maxChunkRangeForConnections; dx++)
@@ -611,7 +730,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         
         if (roomsInArea.Count < 2) return;
         
-        // Minimum Spanning Tree
         List<CuboidRoom> connected = new List<CuboidRoom>();
         List<CuboidRoom> unconnected = new List<CuboidRoom>(roomsInArea);
         
@@ -654,7 +772,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             }
         }
         
-        // Add extra random connections
         AddExtraCorridors(roomsInArea, chunkSize);
     }
     
@@ -665,26 +782,16 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         corridor.roomAId = roomA.id;
         corridor.roomBId = roomB.id;
         
-        Vector3Int startPoint = roomA.GetClosestSurfacePoint(roomB.center);
-        Vector3Int endPoint = roomB.GetClosestSurfacePoint(roomA.center);
+        Vector3Int startPoint = GetClosestSurfacePoint(roomA, roomB.center);
+        Vector3Int endPoint = GetClosestSurfacePoint(roomB, roomA.center);
         
         corridor.start = startPoint;
         corridor.end = endPoint;
         
         List<Vector3Int> path = new List<Vector3Int>();
         
-        // L-shaped path
-        Vector3Int mid1 = new Vector3Int(endPoint.x, startPoint.y, startPoint.z);
-        GenerateLinePath(startPoint, mid1, path);
-        
-        if (mid1.y != endPoint.y)
-        {
-            Vector3Int mid2 = new Vector3Int(endPoint.x, endPoint.y, startPoint.z);
-            GenerateLinePath(mid1, mid2, path);
-            mid1 = mid2;
-        }
-        
-        GenerateLinePath(mid1, endPoint, path);
+        // Create an L-shaped path with better boundary handling
+        CreateLShapedPath(startPoint, endPoint, path, chunkSize);
         
         corridor.pathCells = path;
         
@@ -693,25 +800,71 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         corridor.height = variableCorridorSize ? 
             Random.Range(minCorridorHeight, maxCorridorHeight + 1) : minCorridorHeight;
         
-        Debug.Log($"Created corridor {corridor.id} from room {roomA.id} to {roomB.id}, length: {path.Count} cells");
-        
         return corridor;
     }
     
-    private void GenerateLinePath(Vector3Int start, Vector3Int end, List<Vector3Int> path)
+    private Vector3Int GetClosestSurfacePoint(CuboidRoom room, Vector3Int target)
     {
-        Vector3Int current = start;
+        Vector3Int closest = room.center;
+        float closestDist = Vector3Int.Distance(room.center, target);
         
-        while (current != end)
+        Vector3Int[] faceCenters = {
+            new Vector3Int(room.minBounds.x, room.center.y, room.center.z),
+            new Vector3Int(room.maxBounds.x, room.center.y, room.center.z),
+            new Vector3Int(room.center.x, room.minBounds.y, room.center.z),
+            new Vector3Int(room.center.x, room.maxBounds.y, room.center.z),
+            new Vector3Int(room.center.x, room.center.y, room.minBounds.z),
+            new Vector3Int(room.center.x, room.center.y, room.maxBounds.z)
+        };
+        
+        foreach (var faceCenter in faceCenters)
+        {
+            float dist = Vector3Int.Distance(faceCenter, target);
+            if (dist < closestDist)
+            {
+                closestDist = dist;
+                closest = faceCenter;
+            }
+        }
+        
+        return closest;
+    }
+    
+    private void CreateLShapedPath(Vector3Int start, Vector3Int end, List<Vector3Int> path, Vector3Int chunkSize)
+    {
+        // First move in X direction
+        Vector3Int current = start;
+        int xDir = Mathf.Clamp(end.x - start.x, -1, 1);
+        
+        while (current.x != end.x)
         {
             path.Add(current);
+            current.x += xDir;
+        }
+        
+        // Then move in Z direction
+        int zDir = Mathf.Clamp(end.z - current.z, -1, 1);
+        
+        while (current.z != end.z)
+        {
+            path.Add(current);
+            current.z += zDir;
+        }
+        
+        // Finally adjust Y if needed
+        if (current.y != end.y)
+        {
+            int yDir = Mathf.Clamp(end.y - current.y, -1, 1);
             
-            if (current.x != end.x)
-                current.x += current.x < end.x ? 1 : -1;
-            else if (current.y != end.y)
-                current.y += current.y < end.y ? 1 : -1;
-            else if (current.z != end.z)
-                current.z += current.z < end.z ? 1 : -1;
+            // Create staircase-like path for vertical movement
+            while (current.y != end.y)
+            {
+                path.Add(current);
+                current.y += yDir;
+                // Move forward one step for each vertical step
+                current.z += zDir;
+                path.Add(current);
+            }
         }
         
         path.Add(end);
@@ -873,41 +1026,31 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     
     public void ClearChunkData(Vector3Int chunkCoord)
     {
-        if (noiseGridsByChunk.ContainsKey(chunkCoord))
-            noiseGridsByChunk.Remove(chunkCoord);
-            
-        // Note: We don't clear rooms/corridors as they are global
-        // The manager will handle unloading meshes
+        if (voxelGridsByChunk.ContainsKey(chunkCoord))
+            voxelGridsByChunk.Remove(chunkCoord);
     }
     
-    void OnDrawGizmosSelected()
+    // NEW: Method to regenerate boundary walls when a neighbor is loaded
+    public void UpdateChunkBoundaries(Vector3Int chunkCoord)
     {
-        if (!Application.isPlaying) return;
+        if (!voxelGridsByChunk.ContainsKey(chunkCoord)) return;
         
-        // Draw all rooms
-        Gizmos.color = new Color(0, 1, 1, 0.3f);
-        foreach (var room in allRooms.Values)
-        {
-            Vector3 center = new Vector3(
-                room.minBounds.x + room.size.x / 2f,
-                room.minBounds.y + room.size.y / 2f,
-                room.minBounds.z + room.size.z / 2f
-            );
-            Gizmos.DrawWireCube(center, room.size);
-        }
+        // Get all neighboring chunks
+        Vector3Int[] neighborDirections = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.forward, Vector3Int.back
+        };
         
-        // Draw corridors
-        Gizmos.color = new Color(1, 0.5f, 0, 0.5f);
-        foreach (var corridor in allCorridors.Values)
+        foreach (var direction in neighborDirections)
         {
-            if (corridor.pathCells.Count > 0)
+            Vector3Int neighborCoord = chunkCoord + direction;
+            
+            // If both chunks are loaded, we might need to update them
+            if (voxelGridsByChunk.ContainsKey(neighborCoord))
             {
-                for (int i = 0; i < corridor.pathCells.Count - 1; i++)
-                {
-                    Vector3 start = corridor.pathCells[i];
-                    Vector3 end = corridor.pathCells[i + 1];
-                    Gizmos.DrawLine(start, end);
-                }
+                // In a more advanced system, you could regenerate both chunks
+                // For now, we'll just flag that boundaries might need updating
+                Debug.Log($"Adjacent chunks {chunkCoord} and {neighborCoord} are both loaded - boundaries should align");
             }
         }
     }

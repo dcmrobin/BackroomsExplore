@@ -45,7 +45,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e0f35900027322a42b234de097668e8d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  lightPlacementChance: 0.2
+  lightPlacementChance: 0.02
   minLightsPerRoom: 1
   maxLightsPerRoom: 3
   lightDecay: 0.15
