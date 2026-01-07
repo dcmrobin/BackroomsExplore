@@ -321,7 +321,6 @@ MonoBehaviour:
   chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
   playerTransform: {fileID: 1585999911}
   chunkMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
-  roomGenerator: {fileID: 1882148091}
 --- !u!4 &1882148090
 Transform:
   m_ObjectHideFlags: 0
@@ -349,19 +348,20 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 22251ba5f91e0d940a944f7640209e11, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  minRoomSize: 6
-  maxRoomSize: 16
-  minRoomHeight: 4
-  maxRoomHeight: 8
-  roomDensity: 0.4
-  roomPlacementAttempts: 20
+  noiseScale: 0.01
+  fillThreshold: 0.4
+  smoothingIterations: 2
+  minRoomSize: 7
+  maxRoomSize: 50
+  verticalBiasStrength: 0.3
+  maxCrossChunkRoomSpan: 2
   minCorridorWidth: 2
   maxCorridorWidth: 4
-  corridorHeight: 3
-  corridorTurnRadius: 2
-  floorHeight: 16
-  maxFloors: 3
-  staircaseChance: 0.3
+  minCorridorHeight: 3
+  maxCorridorHeight: 5
+  variableCorridorSize: 1
+  crossChunkCorridorChance: 0.3
+  scanStep: 2
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
