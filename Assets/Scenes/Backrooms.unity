@@ -350,20 +350,18 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 22251ba5f91e0d940a944f7640209e11, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  noiseScale: 0.02
+  noiseScale: 0.1
   fillThreshold: 0.4
   smoothingIterations: 2
   minRoomSize: 7
-  maxRoomSize: 120
-  minCorridorWidth: 2
-  maxCorridorWidth: 4
-  minCorridorHeight: 3
-  maxCorridorHeight: 5
-  variableCorridorSize: 1
+  maxRoomSize: 20
+  corridorWidth: 3
+  corridorHeight: 4
   verticalConnectionChance: 0.2
-  minStairHeight: 4
-  maxStairHeight: 8
+  verticalShaftMinHeight: 3
+  verticalShaftMaxHeight: 12
   scanStep: 2
+  maxGenerationRange: 5
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

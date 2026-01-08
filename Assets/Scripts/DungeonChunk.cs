@@ -27,6 +27,10 @@ public class DungeonChunk : MonoBehaviour
     private Vector3Int chunkSize;
     private List<Vector3Int> lightPositions = new List<Vector3Int>();
     
+    // Reference to the chunk manager for cross-chunk checks
+    private InfiniteChunkManager chunkManager;
+    private Vector3Int chunkCoord;
+    
     // Material IDs (must match shader)
     private const byte MATERIAL_WALL = 0;
     private const byte MATERIAL_FLOOR = 1;
@@ -47,6 +51,14 @@ public class DungeonChunk : MonoBehaviour
         
         // Initialize light grid
         lightGrid = new float[size.x, size.y, size.z];
+        
+        // Get reference to chunk manager
+        chunkManager = FindObjectOfType<InfiniteChunkManager>();
+    }
+    
+    public void SetChunkCoord(Vector3Int coord)
+    {
+        chunkCoord = coord;
     }
     
     public void GenerateMesh(bool[,,] grid)
@@ -305,7 +317,7 @@ public class DungeonChunk : MonoBehaviour
                 {
                     if (voxelGrid[x, y, z])
                     {
-                        AddFacesWithLightingData(x, y, z, meshData);
+                        AddFacesWithCrossChunkCulling(x, y, z, meshData);
                     }
                 }
             }
@@ -314,7 +326,7 @@ public class DungeonChunk : MonoBehaviour
         return meshData;
     }
     
-    private void AddFacesWithLightingData(int x, int y, int z, MeshData meshData)
+    private void AddFacesWithCrossChunkCulling(int x, int y, int z, MeshData meshData)
     {
         Vector3 offset = new Vector3(x, y, z);
         
@@ -329,18 +341,8 @@ public class DungeonChunk : MonoBehaviour
             }
         }
         
-        // LEFT FACE - but skip if there's a corridor/room continuing in the next chunk
-        if (x == 0)
-        {
-            // Check if this is at a chunk boundary
-            // We'll generate the face anyway - the real fix is in the voxel data
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.left);
-            AddFace(offset, 
-                new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
-                meshData, materialID, false, faceLight);
-        }
-        else if (!voxelGrid[x - 1, y, z])
+        // LEFT FACE (Negative X)
+        if (ShouldGenerateFace(x, y, z, Vector3Int.left))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
             float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.left);
@@ -349,16 +351,8 @@ public class DungeonChunk : MonoBehaviour
                 meshData, materialID, false, faceLight);
         }
         
-        // RIGHT FACE
-        if (x == chunkSize.x - 1)
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.right);
-            AddFace(offset, 
-                new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
-                meshData, materialID, false, faceLight);
-        }
-        else if (!voxelGrid[x + 1, y, z])
+        // RIGHT FACE (Positive X)
+        if (ShouldGenerateFace(x, y, z, Vector3Int.right))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
             float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.right);
@@ -367,8 +361,8 @@ public class DungeonChunk : MonoBehaviour
                 meshData, materialID, false, faceLight);
         }
         
-        // BOTTOM FACE - FLOOR
-        if (y == 0 || !voxelGrid[x, y - 1, z])
+        // BOTTOM FACE (Negative Y) - FLOOR
+        if (ShouldGenerateFace(x, y, z, Vector3Int.down))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_FLOOR;
             float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.down);
@@ -377,8 +371,8 @@ public class DungeonChunk : MonoBehaviour
                 meshData, materialID, true, faceLight);
         }
         
-        // TOP FACE - CEILING
-        if (y == chunkSize.y - 1 || !voxelGrid[x, y + 1, z])
+        // TOP FACE (Positive Y) - CEILING
+        if (ShouldGenerateFace(x, y, z, Vector3Int.up))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_CEILING;
             float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.up);
@@ -387,16 +381,8 @@ public class DungeonChunk : MonoBehaviour
                 meshData, materialID, true, faceLight);
         }
         
-        // FRONT FACE
-        if (z == 0)
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.back);
-            AddFace(offset, 
-                new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
-                meshData, materialID, false, faceLight);
-        }
-        else if (!voxelGrid[x, y, z - 1])
+        // FRONT FACE (Negative Z)
+        if (ShouldGenerateFace(x, y, z, Vector3Int.back))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
             float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.back);
@@ -405,8 +391,8 @@ public class DungeonChunk : MonoBehaviour
                 meshData, materialID, false, faceLight);
         }
         
-        // BACK FACE
-        if (z == chunkSize.z - 1)
+        // BACK FACE (Positive Z)
+        if (ShouldGenerateFace(x, y, z, Vector3Int.forward))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
             float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.forward);
@@ -414,14 +400,81 @@ public class DungeonChunk : MonoBehaviour
                 new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
                 meshData, materialID, false, faceLight);
         }
-        else if (!voxelGrid[x, y, z + 1])
+    }
+    
+    private bool ShouldGenerateFace(int x, int y, int z, Vector3Int direction)
+    {
+        // Check adjacent voxel in this chunk
+        Vector3Int adjPos = new Vector3Int(x, y, z) + direction;
+        
+        if (IsInGrid(adjPos))
         {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.forward);
-            AddFace(offset, 
-                new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
-                meshData, materialID, false, faceLight);
+            // If adjacent voxel is solid in this chunk, don't generate face
+            return !voxelGrid[adjPos.x, adjPos.y, adjPos.z];
         }
+        else
+        {
+            // This voxel is at a chunk boundary
+            // Need to check adjacent chunk
+            return !IsSolidInAdjacentChunk(x, y, z, direction);
+        }
+    }
+    
+    private bool IsSolidInAdjacentChunk(int x, int y, int z, Vector3Int direction)
+    {
+        if (chunkManager == null) return false;
+        
+        // Calculate which adjacent chunk we need to check
+        Vector3Int adjacentChunkCoord = chunkCoord;
+        Vector3Int localPosInAdjacentChunk = new Vector3Int(x, y, z);
+        
+        // Adjust chunk coordinate and local position based on direction
+        if (direction.x == -1 && x == 0) // Left boundary
+        {
+            adjacentChunkCoord += Vector3Int.left;
+            localPosInAdjacentChunk.x = chunkSize.x - 1;
+        }
+        else if (direction.x == 1 && x == chunkSize.x - 1) // Right boundary
+        {
+            adjacentChunkCoord += Vector3Int.right;
+            localPosInAdjacentChunk.x = 0;
+        }
+        else if (direction.y == -1 && y == 0) // Bottom boundary
+        {
+            adjacentChunkCoord += Vector3Int.down;
+            localPosInAdjacentChunk.y = chunkSize.y - 1;
+        }
+        else if (direction.y == 1 && y == chunkSize.y - 1) // Top boundary
+        {
+            adjacentChunkCoord += Vector3Int.up;
+            localPosInAdjacentChunk.y = 0;
+        }
+        else if (direction.z == -1 && z == 0) // Front boundary
+        {
+            adjacentChunkCoord += Vector3Int.back;
+            localPosInAdjacentChunk.z = chunkSize.z - 1;
+        }
+        else if (direction.z == 1 && z == chunkSize.z - 1) // Back boundary
+        {
+            adjacentChunkCoord += Vector3Int.forward;
+            localPosInAdjacentChunk.z = 0;
+        }
+        else
+        {
+            // Not at boundary in this direction
+            return false;
+        }
+        
+        // Check if adjacent chunk is loaded
+        if (chunkManager.TryGetVoxelData(adjacentChunkCoord, localPosInAdjacentChunk, out bool isSolid))
+        {
+            return isSolid;
+        }
+        
+        // If adjacent chunk isn't loaded, we can't know for sure
+        // Conservative approach: assume it's solid so we generate the face
+        // This might create double walls at chunk boundaries until neighbor loads
+        return false;
     }
     
     private float GetFaceLightLevel(int x, int y, int z, Vector3Int faceNormal)

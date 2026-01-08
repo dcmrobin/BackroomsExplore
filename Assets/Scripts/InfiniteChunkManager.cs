@@ -243,6 +243,9 @@ public class InfiniteChunkManager : MonoBehaviour
         chunk.transform.SetParent(chunkContainer);
         chunk.name = $"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}";
         
+        // Set chunk coordinate for cross-chunk checks
+        chunk.SetChunkCoord(chunkCoord);
+        
         // Set material
         MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
         if (renderer != null && chunkMaterial != null)
@@ -263,6 +266,48 @@ public class InfiniteChunkManager : MonoBehaviour
         chunk.GenerateMesh(voxelGrid);
         
         loadedChunks[chunkCoord] = chunk;
+    }
+    
+    // NEW METHOD: Allows chunks to query voxel data from other chunks
+    public bool TryGetVoxelData(Vector3Int chunkCoord, Vector3Int localPos, out bool isSolid)
+    {
+        if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+        {
+            if (localPos.x >= 0 && localPos.x < chunkSize.x &&
+                localPos.y >= 0 && localPos.y < chunkSize.y &&
+                localPos.z >= 0 && localPos.z < chunkSize.z)
+            {
+                isSolid = voxelGrid[localPos.x, localPos.y, localPos.z];
+                return true;
+            }
+        }
+        
+        isSolid = false;
+        return false;
+    }
+    
+    // NEW METHOD: Get direct access to a chunk's voxel grid
+    public bool[,,] GetChunkVoxelGrid(Vector3Int chunkCoord)
+    {
+        if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+        {
+            return voxelGrid;
+        }
+        return null;
+    }
+    
+    // NEW METHOD: Update chunk mesh when adjacent chunks load/unload
+    public void UpdateChunkBoundaryMeshes(Vector3Int chunkCoord)
+    {
+        if (loadedChunks.TryGetValue(chunkCoord, out DungeonChunk chunk))
+        {
+            // Get the voxel grid for this chunk
+            if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+            {
+                // Regenerate mesh with updated boundary information
+                chunk.GenerateMesh(voxelGrid);
+            }
+        }
     }
     
     private Vector3Int WorldToChunkCoord(Vector3 worldPos)
@@ -302,6 +347,25 @@ public class InfiniteChunkManager : MonoBehaviour
             // Clear generator data for this chunk
             roomGenerator.ClearChunkData(chunkCoord);
             chunkVoxelCache.Remove(chunkCoord);
+            
+            // Update adjacent chunks that might have been relying on this chunk
+            UpdateAdjacentChunks(chunkCoord);
+        }
+    }
+    
+    // NEW METHOD: Update adjacent chunks when a chunk unloads
+    private void UpdateAdjacentChunks(Vector3Int unloadedChunkCoord)
+    {
+        Vector3Int[] directions = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+        
+        foreach (var dir in directions)
+        {
+            Vector3Int adjacentCoord = unloadedChunkCoord + dir;
+            UpdateChunkBoundaryMeshes(adjacentCoord);
         }
     }
     
