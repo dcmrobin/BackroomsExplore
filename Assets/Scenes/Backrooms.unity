@@ -315,11 +315,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a846c99c3bf674c40ae13258884a40fd, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  chunkSize: {x: 32, y: 16, z: 32}
+  chunkSize: {x: 16, y: 16, z: 16}
   renderDistance: 3
   useObjectPooling: 1
   maxChunksPerFrame: 1
   cancelDistantGeneration: 1
+  asyncGeneration: 0
   chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
   playerTransform: {fileID: 1585999911}
   chunkMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
@@ -350,18 +351,25 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 22251ba5f91e0d940a944f7640209e11, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  noiseScale: 0.1
-  fillThreshold: 0.4
-  smoothingIterations: 2
+  noiseScale: {x: 0.025, y: 0.025, z: 0.025}
+  noiseOffset: {x: 0, y: 0, z: 0}
+  useNoiseCache: 1
+  roomThreshold: 0.8
+  roomExpansionThreshold: 0.35
   minRoomSize: 7
   maxRoomSize: 20
-  corridorWidth: 3
+  roomScanStep: 2
+  maxExpansionSteps: 20
+  expansionStepSize: 1
+  expandToGrid: 0
+  gridAlignment: 2
+  minCorridorWidth: 3
+  maxCorridorWidth: 5
   corridorHeight: 4
-  verticalConnectionChance: 0.2
-  verticalShaftMinHeight: 3
-  verticalShaftMaxHeight: 12
-  scanStep: 2
-  maxGenerationRange: 5
+  verticalShaftSize: 3
+  verticalConnectionChance: 0.4
+  maxRoomsToKeep: 1000
+  pruneRadius: 10
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

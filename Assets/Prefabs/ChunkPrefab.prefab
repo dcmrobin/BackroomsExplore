@@ -48,7 +48,7 @@ MonoBehaviour:
   lightPlacementChance: 0.02
   minLightsPerRoom: 1
   maxLightsPerRoom: 3
-  lightDecay: 0.15
+  lightDecay: 0.1
   lightPropagationSteps: 15
   lightSourceIntensity: 1
   smoothLighting: 1
