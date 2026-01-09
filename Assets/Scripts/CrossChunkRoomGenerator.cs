@@ -4,63 +4,94 @@ using System.Linq;
 
 public class CrossChunkRoomGenerator : MonoBehaviour
 {
-    [Header("Noise Settings")]
-    [SerializeField] private float noiseScale = 0.08f;
-    [Range(0, 1)] [SerializeField] private float fillThreshold = 0.45f;
-    [SerializeField] private int smoothingIterations = 2;
+    [Header("3D Noise Settings")]
+    [SerializeField] private Vector3 noiseScale = new Vector3(0.03f, 0.03f, 0.03f);
+    [SerializeField] private Vector3 noiseOffset = Vector3.zero;
+    [SerializeField] private bool useNoiseCache = true; // NEW: Performance optimization
     
-    [Header("Room Settings")]
+    [Header("Room Detection")]
+    [SerializeField] private float roomThreshold = 0.65f;
+    [SerializeField] private float roomExpansionThreshold = 0.55f;
     [SerializeField] private int minRoomSize = 4;
-    [SerializeField] private int maxRoomSize = 20;
-    [SerializeField] private bool allowEdgeRooms = true; // NEW: Allow rooms at chunk edges
-    [SerializeField] private float edgeRoomChance = 0.3f; // Chance for rooms to touch edges
+    [SerializeField] private int maxRoomSize = 30;
+    [SerializeField] private int roomScanStep = 4;
+    
+    [Header("Room Expansion")]
+    [SerializeField] private int maxExpansionSteps = 20;
+    [SerializeField] private float expansionStepSize = 1.0f;
+    [SerializeField] private bool expandToGrid = true;
+    [SerializeField] private int gridAlignment = 2;
     
     [Header("Corridor Settings")]
-    [SerializeField] private int corridorWidth = 3;
+    [SerializeField] private int minCorridorWidth = 3;
+    [SerializeField] private int maxCorridorWidth = 5;
     [SerializeField] private int corridorHeight = 4;
-    [SerializeField] private bool corridorsTouchEdges = true; // NEW: Corridors can go to edges
-    
-    [Header("Vertical Connections")]
+    [SerializeField] private int verticalShaftSize = 3;
     [SerializeField] private float verticalConnectionChance = 0.3f;
-    [SerializeField] private int verticalShaftMinHeight = 3;
-    [SerializeField] private int verticalShaftMaxHeight = 12;
     
-    [Header("Generation Optimization")]
-    [SerializeField] private int scanStep = 2;
-    [SerializeField] private int maxGenerationRange = 5;
+    [Header("Memory Management")]
+    [SerializeField] private int maxRoomsToKeep = 1000;
+    [SerializeField] private int pruneRadius = 10; // Chunks
     
-    // GLOBAL STORAGE - Cross-chunk aware
+    // Global storage
     private Dictionary<int, CuboidRoom> allRooms = new Dictionary<int, CuboidRoom>();
-    private Dictionary<int, Connection> allConnections = new Dictionary<int, Connection>();
+    private Dictionary<int, Corridor> allCorridors = new Dictionary<int, Corridor>();
     private Dictionary<Vector3Int, HashSet<int>> chunkToRooms = new Dictionary<Vector3Int, HashSet<int>>();
-    private Dictionary<Vector3Int, HashSet<int>> chunkToConnections = new Dictionary<Vector3Int, HashSet<int>>();
+    private Dictionary<Vector3Int, HashSet<int>> chunkToCorridors = new Dictionary<Vector3Int, HashSet<int>>();
     
-    // Spatial partitioning for faster room queries
+    // Spatial partitioning - FIXED: Actually used now
     private Dictionary<Vector3Int, HashSet<int>> roomSpatialGrid = new Dictionary<Vector3Int, HashSet<int>>();
-    private int spatialGridSize = 16;
+    private int spatialGridSize = 32;
     
+    // State
     private int nextRoomId = 0;
-    private int nextConnectionId = 0;
+    private int nextCorridorId = 0;
     private Vector3Int currentChunkSize;
-    private HashSet<Vector3Int> initializedChunks = new HashSet<Vector3Int>();
+    private HashSet<Vector3Int> processedChunks = new HashSet<Vector3Int>();
     
+    // Performance optimizations
+    private Dictionary<Vector3Int, float> noiseCache = new Dictionary<Vector3Int, float>();
+    private object generationLock = new object(); // FIXED: Thread safety
+    
+    // Room class
     private class CuboidRoom
     {
         public int id;
-        public Vector3Int minBounds; // WORLD coordinates
-        public Vector3Int maxBounds; // WORLD coordinates
         public Vector3Int center;
+        public Vector3Int minBounds;
+        public Vector3Int maxBounds;
         public Vector3Int size;
         public Vector3Int generationChunk;
+        public bool isActive = true;
         
-        public CuboidRoom(int id, Vector3Int min, Vector3Int max, Vector3Int genChunk)
+        public CuboidRoom(int id, Vector3Int center, Vector3Int genChunk)
         {
             this.id = id;
+            this.center = center;
+            this.minBounds = center;
+            this.maxBounds = center;
+            this.size = Vector3Int.one;
+            this.generationChunk = genChunk;
+        }
+        
+        public void SetBounds(Vector3Int min, Vector3Int max)
+        {
             minBounds = min;
             maxBounds = max;
-            size = max - min + Vector3Int.one;
+            size = max - min + Vector3One;
             center = minBounds + size / 2;
-            generationChunk = genChunk;
+            
+            // Ensure minimum size - FIXED: Prevent 1x1x1 rooms
+            if (size.x < 2) { maxBounds.x = minBounds.x + 1; size.x = 2; }
+            if (size.y < 2) { maxBounds.y = minBounds.y + 1; size.y = 2; }
+            if (size.z < 2) { maxBounds.z = minBounds.z + 1; size.z = 2; }
+        }
+        
+        public bool ContainsPoint(Vector3Int worldPos)
+        {
+            return worldPos.x >= minBounds.x && worldPos.x <= maxBounds.x &&
+                   worldPos.y >= minBounds.y && worldPos.y <= maxBounds.y &&
+                   worldPos.z >= minBounds.z && worldPos.z <= maxBounds.z;
         }
         
         public bool Overlaps(CuboidRoom other)
@@ -91,6 +122,8 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             return chunks.ToList();
         }
         
+        public int Volume => size.x * size.y * size.z;
+        
         private Vector3Int WorldToChunkCoord(Vector3Int worldPos, Vector3Int chunkSize)
         {
             return new Vector3Int(
@@ -99,9 +132,12 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 Mathf.FloorToInt(worldPos.z / (float)chunkSize.z)
             );
         }
+        
+        private static readonly Vector3Int Vector3One = new Vector3Int(1, 1, 1);
     }
     
-    private class Connection
+    // Corridor class
+    private class Corridor
     {
         public int id;
         public int roomAId;
@@ -110,6 +146,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         public List<Vector3Int> path = new List<Vector3Int>();
         public int width;
         public int height;
+        public bool isActive = true;
         
         public List<Vector3Int> GetOccupiedChunks(Vector3Int chunkSize)
         {
@@ -120,9 +157,13 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 Vector3Int chunk = WorldToChunkCoord(point, chunkSize);
                 chunks.Add(chunk);
                 
-                // Include neighboring chunks since connections can cross boundaries
-                foreach (var dir in new Vector3Int[] { Vector3Int.up, Vector3Int.down, 
-                    Vector3Int.right, Vector3Int.left, Vector3Int.forward, Vector3Int.back })
+                // Include neighboring chunks for corridor width/height
+                Vector3Int[] neighbors = {
+                    Vector3Int.up, Vector3Int.down, Vector3Int.right,
+                    Vector3Int.left, Vector3Int.forward, Vector3Int.back
+                };
+                
+                foreach (var dir in neighbors)
                 {
                     chunks.Add(chunk + dir);
                 }
@@ -145,180 +186,447 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     {
         currentChunkSize = chunkSize;
         allRooms.Clear();
-        allConnections.Clear();
+        allCorridors.Clear();
         chunkToRooms.Clear();
-        chunkToConnections.Clear();
+        chunkToCorridors.Clear();
         roomSpatialGrid.Clear();
-        initializedChunks.Clear();
+        processedChunks.Clear();
+        noiseCache.Clear();
         nextRoomId = 0;
-        nextConnectionId = 0;
+        nextCorridorId = 0;
+        
+        noiseOffset = new Vector3(
+            Random.Range(-1000f, 1000f),
+            Random.Range(-1000f, 1000f),
+            Random.Range(-1000f, 1000f)
+        );
     }
     
     public void GenerateForChunk(Vector3Int chunkCoord, Vector3Int chunkSize, ref bool[,,] finalGrid)
     {
-        currentChunkSize = chunkSize;
-        Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
-        
-        // Step 1: Clear the grid
-        ClearGrid(ref finalGrid, chunkSize);
-        
-        // Step 2: Initialize rooms for this chunk if not already done
-        if (!initializedChunks.Contains(chunkCoord))
+        lock (generationLock) // FIXED: Thread safety
         {
-            InitializeChunkRooms(chunkCoord, chunkSize);
-            initializedChunks.Add(chunkCoord);
-        }
-        
-        // Step 3: Get ALL rooms that affect this chunk
-        List<CuboidRoom> relevantRooms = GetRoomsForChunk(chunkCoord, chunkSize);
-        
-        // Step 4: Carve rooms into grid (NOW INCLUDING EDGES)
-        foreach (var room in relevantRooms)
-        {
-            CarveRoomIntoGridWithEdges(room, worldOffset, chunkSize, ref finalGrid);
-        }
-        
-        // Step 5: Get and carve connections that affect this chunk
-        List<Connection> relevantConnections = GetConnectionsForChunk(chunkCoord, chunkSize);
-        foreach (var connection in relevantConnections)
-        {
-            CarveConnectionIntoGridWithEdges(connection, worldOffset, chunkSize, ref finalGrid);
-        }
-    }
-    
-    private void InitializeChunkRooms(Vector3Int chunkCoord, Vector3Int chunkSize)
-    {
-        Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
-        
-        // Generate noise for potential room locations - INCLUDING EDGES
-        List<Vector3Int> potentialRoomCenters = FindPotentialRoomCentersIncludingEdges(chunkCoord, chunkSize);
-        
-        foreach (var localCenter in potentialRoomCenters)
-        {
-            Vector3Int worldCenter = localCenter + worldOffset;
+            currentChunkSize = chunkSize;
+            Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
             
-            // Check if this area is already occupied by a room
-            if (IsAreaOccupied(worldCenter, minRoomSize))
-                continue;
+            ClearGrid(ref finalGrid, chunkSize);
             
-            // Try to create a room - ALLOWING EDGE ROOMS
-            CuboidRoom room = TryCreateRoomAtWithEdges(worldCenter, chunkCoord, chunkSize);
-            if (room != null)
+            if (!processedChunks.Contains(chunkCoord))
             {
-                RegisterRoom(room, chunkSize);
-                
-                // Try to connect to nearby rooms
-                ConnectRoomToNeighbors(room, chunkSize);
+                GenerateRoomsForChunk(chunkCoord);
+                processedChunks.Add(chunkCoord);
+            }
+            
+            // Get rooms for this chunk (direct access, no double lookup)
+            List<CuboidRoom> relevantRooms = GetRoomsForChunkDirect(chunkCoord);
+            foreach (var room in relevantRooms)
+            {
+                if (room.isActive)
+                    CarveCuboidRoomIntoGrid(room, worldOffset, chunkSize, ref finalGrid);
+            }
+            
+            // Get corridors for this chunk (direct access)
+            List<Corridor> relevantCorridors = GetCorridorsForChunkDirect(chunkCoord);
+            foreach (var corridor in relevantCorridors)
+            {
+                if (corridor.isActive)
+                    CarveGeometricCorridorIntoGrid(corridor, worldOffset, chunkSize, ref finalGrid);
             }
         }
     }
     
-    private List<Vector3Int> FindPotentialRoomCentersIncludingEdges(Vector3Int chunkCoord, Vector3Int chunkSize)
+    private void GenerateRoomsForChunk(Vector3Int chunkCoord)
     {
-        List<Vector3Int> centers = new List<Vector3Int>();
-        Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, chunkSize);
+        Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, currentChunkSize);
         
-        // Allow centers at the very edges of chunks
-        int minX = allowEdgeRooms ? 0 : minRoomSize/2;
-        int maxX = allowEdgeRooms ? chunkSize.x : chunkSize.x - minRoomSize/2;
-        int minY = allowEdgeRooms ? 0 : minRoomSize/2;
-        int maxY = allowEdgeRooms ? chunkSize.y : chunkSize.y - minRoomSize/2;
-        int minZ = allowEdgeRooms ? 0 : minRoomSize/2;
-        int maxZ = allowEdgeRooms ? chunkSize.z : chunkSize.z - minRoomSize/2;
-        
-        int step = Mathf.Max(scanStep, minRoomSize / 2);
-        
-        for (int x = minX; x < maxX; x += step)
+        for (int x = 0; x < currentChunkSize.x; x += roomScanStep)
         {
-            for (int y = minY; y < maxY; y += step)
+            for (int y = 0; y < currentChunkSize.y; y += roomScanStep)
             {
-                for (int z = minZ; z < maxZ; z += step)
+                for (int z = 0; z < currentChunkSize.z; z += roomScanStep)
                 {
-                    // Increase chance for edge rooms
-                    bool isAtEdge = x == 0 || x == chunkSize.x - 1 || 
-                                   y == 0 || y == chunkSize.y - 1 || 
-                                   z == 0 || z == chunkSize.z - 1;
-                    
                     Vector3Int worldPos = new Vector3Int(x, y, z) + worldOffset;
-                    float noise = GetNoiseAt(worldPos);
                     
-                    // Edge rooms get a chance boost
-                    float threshold = isAtEdge && Random.value < edgeRoomChance ? 
-                        fillThreshold * 0.8f : fillThreshold;
+                    float noiseValue = GetCachedNoise(worldPos);
                     
-                    if (noise > threshold)
+                    if (noiseValue > roomThreshold && !IsPointInAnyRoomOptimized(worldPos))
                     {
-                        centers.Add(new Vector3Int(x, y, z));
+                        CreateAndExpandRoom(worldPos, chunkCoord);
                     }
                 }
             }
         }
         
-        return centers;
+        ConnectRooms();
     }
     
-    private CuboidRoom TryCreateRoomAtWithEdges(Vector3Int worldCenter, Vector3Int genChunk, Vector3Int chunkSize)
+    private float GetCachedNoise(Vector3Int worldPos)
     {
-        // Determine room size
-        int sizeX = Random.Range(minRoomSize, maxRoomSize + 1);
-        int sizeY = Random.Range(minRoomSize, Mathf.Min(maxRoomSize, chunkSize.y) + 1);
-        int sizeZ = Random.Range(minRoomSize, maxRoomSize + 1);
+        if (useNoiseCache && noiseCache.TryGetValue(worldPos, out float cachedValue))
+            return cachedValue;
         
-        // Decide if room should be centered or can extend beyond chunk
-        bool centerInChunk = Random.value > 0.5f;
+        float x = (worldPos.x + noiseOffset.x) * noiseScale.x;
+        float y = (worldPos.y + noiseOffset.y) * noiseScale.y;
+        float z = (worldPos.z + noiseOffset.z) * noiseScale.z;
         
-        Vector3Int minBounds, maxBounds;
+        float noiseValue = Mathf.PerlinNoise(x + z * 0.5f, y + z * 0.5f);
         
-        if (centerInChunk)
+        if (useNoiseCache)
+            noiseCache[worldPos] = noiseValue;
+        
+        return noiseValue;
+    }
+    
+    private bool IsPointInAnyRoomOptimized(Vector3Int worldPos)
+    {
+        Vector3Int gridCell = GetSpatialGridCell(worldPos);
+        
+        if (roomSpatialGrid.TryGetValue(gridCell, out HashSet<int> roomIds))
         {
-            // Traditional centered room
-            minBounds = worldCenter - new Vector3Int(sizeX / 2, sizeY / 2, sizeZ / 2);
-            maxBounds = minBounds + new Vector3Int(sizeX - 1, sizeY - 1, sizeZ - 1);
+            foreach (int roomId in roomIds)
+            {
+                if (allRooms.TryGetValue(roomId, out CuboidRoom room) && room.isActive && room.ContainsPoint(worldPos))
+                    return true;
+            }
+        }
+        return false;
+    }
+    
+    private void CreateAndExpandRoom(Vector3Int seedPos, Vector3Int genChunk)
+    {
+        CuboidRoom room = new CuboidRoom(nextRoomId++, seedPos, genChunk);
+        ExpandRoomGeometrically(room);
+        
+        // Ensure minimum viable room
+        if (room.size.x >= minRoomSize && room.size.y >= minRoomSize && room.size.z >= minRoomSize)
+        {
+            RegisterRoom(room);
         }
         else
         {
-            // Allow room to extend from edge
-            Vector3Int chunkWorldMin = Vector3Int.Scale(genChunk, chunkSize);
-            Vector3Int chunkWorldMax = chunkWorldMin + chunkSize - Vector3Int.one;
-            
-            // Choose an anchor point (could be at edge)
-            Vector3Int anchor = worldCenter;
-            
-            // Sometimes anchor at chunk edge
-            if (Random.value < 0.3f)
-            {
-                if (Random.value > 0.5f) anchor.x = chunkWorldMin.x;
-                else anchor.x = chunkWorldMax.x;
-            }
-            if (Random.value < 0.3f)
-            {
-                if (Random.value > 0.5f) anchor.z = chunkWorldMin.z;
-                else anchor.z = chunkWorldMax.z;
-            }
-            
-            minBounds = anchor;
-            maxBounds = anchor + new Vector3Int(sizeX - 1, sizeY - 1, sizeZ - 1);
+            // Room too small, discard it
+            nextRoomId--; // Reuse the ID
         }
-        
-        // Quick overlap check
-        if (CheckRoomOverlap(minBounds, maxBounds))
-            return null;
-        
-        return new CuboidRoom(nextRoomId++, minBounds, maxBounds, genChunk);
     }
     
-    private void CarveRoomIntoGridWithEdges(CuboidRoom room, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
+    private void ExpandRoomGeometrically(CuboidRoom room)
+    {
+        Vector3Int currentMin = room.center;
+        Vector3Int currentMax = room.center;
+        bool[] expansionBlocked = new bool[6]; // Track permanently blocked directions
+        
+        for (int step = 0; step < maxExpansionSteps; step++)
+        {
+            bool expanded = false;
+            
+            // Try each direction if not permanently blocked
+            if (!expansionBlocked[0] && TryExpandDirection(room, ref currentMin, ref currentMax, Vector3Int.left))
+                expanded = true;
+            else
+                expansionBlocked[0] = true;
+                
+            if (!expansionBlocked[1] && TryExpandDirection(room, ref currentMin, ref currentMax, Vector3Int.right))
+                expanded = true;
+            else
+                expansionBlocked[1] = true;
+                
+            if (!expansionBlocked[2] && TryExpandDirection(room, ref currentMin, ref currentMax, Vector3Int.down))
+                expanded = true;
+            else
+                expansionBlocked[2] = true;
+                
+            if (!expansionBlocked[3] && TryExpandDirection(room, ref currentMin, ref currentMax, Vector3Int.up))
+                expanded = true;
+            else
+                expansionBlocked[3] = true;
+                
+            if (!expansionBlocked[4] && TryExpandDirection(room, ref currentMin, ref currentMax, Vector3Int.back))
+                expanded = true;
+            else
+                expansionBlocked[4] = true;
+                
+            if (!expansionBlocked[5] && TryExpandDirection(room, ref currentMin, ref currentMax, Vector3Int.forward))
+                expanded = true;
+            else
+                expansionBlocked[5] = true;
+            
+            if (!expanded || RoomExceedsMaxSize(currentMin, currentMax))
+                break;
+        }
+        
+        room.SetBounds(currentMin, currentMax);
+    }
+    
+    private bool TryExpandDirection(CuboidRoom room, ref Vector3Int currentMin, ref Vector3Int currentMax, Vector3Int direction)
+    {
+        Vector3Int expandMin, expandMax;
+        
+        if (direction == Vector3Int.left)
+        {
+            expandMin = new Vector3Int(currentMin.x - gridAlignment, currentMin.y, currentMin.z);
+            expandMax = new Vector3Int(currentMin.x - 1, currentMax.y, currentMax.z);
+        }
+        else if (direction == Vector3Int.right)
+        {
+            expandMin = new Vector3Int(currentMax.x + 1, currentMin.y, currentMin.z);
+            expandMax = new Vector3Int(currentMax.x + gridAlignment, currentMax.y, currentMax.z);
+        }
+        else if (direction == Vector3Int.down)
+        {
+            expandMin = new Vector3Int(currentMin.x, currentMin.y - gridAlignment, currentMin.z);
+            expandMax = new Vector3Int(currentMax.x, currentMin.y - 1, currentMax.z);
+        }
+        else if (direction == Vector3Int.up)
+        {
+            expandMin = new Vector3Int(currentMin.x, currentMax.y + 1, currentMin.z);
+            expandMax = new Vector3Int(currentMax.x, currentMax.y + gridAlignment, currentMax.z);
+        }
+        else if (direction == Vector3Int.back)
+        {
+            expandMin = new Vector3Int(currentMin.x, currentMin.y, currentMin.z - gridAlignment);
+            expandMax = new Vector3Int(currentMax.x, currentMax.y, currentMin.z - 1);
+        }
+        else // forward
+        {
+            expandMin = new Vector3Int(currentMin.x, currentMin.y, currentMax.z + 1);
+            expandMax = new Vector3Int(currentMax.x, currentMax.y, currentMax.z + gridAlignment);
+        }
+        
+        if (WouldOverlapOtherRooms(expandMin, expandMax, room.id))
+            return false;
+        
+        int validSamples = 0;
+        int totalSamples = 0;
+        
+        for (int x = expandMin.x; x <= expandMax.x; x += gridAlignment)
+        {
+            for (int y = expandMin.y; y <= expandMax.y; y += gridAlignment)
+            {
+                for (int z = expandMin.z; z <= expandMax.z; z += gridAlignment)
+                {
+                    totalSamples++;
+                    Vector3Int samplePos = new Vector3Int(x, y, z);
+                    float noiseValue = GetCachedNoise(samplePos);
+                    
+                    if (noiseValue > roomExpansionThreshold)
+                    {
+                        validSamples++;
+                    }
+                }
+            }
+        }
+        
+        if (totalSamples > 0 && (float)validSamples / totalSamples >= 0.6f)
+        {
+            if (direction == Vector3Int.left) currentMin.x = expandMin.x;
+            else if (direction == Vector3Int.right) currentMax.x = expandMax.x;
+            else if (direction == Vector3Int.down) currentMin.y = expandMin.y;
+            else if (direction == Vector3Int.up) currentMax.y = expandMax.y;
+            else if (direction == Vector3Int.back) currentMin.z = expandMin.z;
+            else currentMax.z = expandMax.z;
+            
+            return true;
+        }
+        
+        return false;
+    }
+    
+    private bool RoomExceedsMaxSize(Vector3Int min, Vector3Int max)
+    {
+        Vector3Int size = max - min + new Vector3Int(1, 1, 1);
+        return size.x > maxRoomSize || size.y > maxRoomSize || size.z > maxRoomSize;
+    }
+    
+    private bool WouldOverlapOtherRooms(Vector3Int min, Vector3Int max, int excludeRoomId)
+    {
+        // Quick spatial grid check
+        Vector3Int testMinChunk = GetSpatialGridCell(min);
+        Vector3Int testMaxChunk = GetSpatialGridCell(max);
+        
+        for (int x = testMinChunk.x; x <= testMaxChunk.x; x++)
+        {
+            for (int y = testMinChunk.y; y <= testMaxChunk.y; y++)
+            {
+                for (int z = testMinChunk.z; z <= testMaxChunk.z; z++)
+                {
+                    Vector3Int gridCell = new Vector3Int(x, y, z);
+                    if (roomSpatialGrid.TryGetValue(gridCell, out HashSet<int> roomIds))
+                    {
+                        foreach (int roomId in roomIds)
+                        {
+                            if (roomId != excludeRoomId && allRooms.TryGetValue(roomId, out CuboidRoom otherRoom) && otherRoom.isActive)
+                            {
+                                // Quick AABB overlap test
+                                if (!(max.x < otherRoom.minBounds.x || min.x > otherRoom.maxBounds.x ||
+                                      max.y < otherRoom.minBounds.y || min.y > otherRoom.maxBounds.y ||
+                                      max.z < otherRoom.minBounds.z || min.z > otherRoom.maxBounds.z))
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    private void ConnectRooms()
+    {
+        List<CuboidRoom> activeRooms = allRooms.Values.Where(r => r.isActive).ToList();
+        
+        if (activeRooms.Count < 2)
+            return;
+        
+        // Create minimum spanning tree
+        List<CuboidRoom> connectedRooms = new List<CuboidRoom>();
+        List<CuboidRoom> unconnectedRooms = new List<CuboidRoom>(activeRooms);
+        
+        CuboidRoom startRoom = unconnectedRooms[Random.Range(0, unconnectedRooms.Count)];
+        connectedRooms.Add(startRoom);
+        unconnectedRooms.Remove(startRoom);
+        
+        while (unconnectedRooms.Count > 0)
+        {
+            float minDistance = float.MaxValue;
+            CuboidRoom closestUnconnected = null;
+            CuboidRoom closestConnected = null;
+            
+            foreach (var connectedRoom in connectedRooms)
+            {
+                foreach (var unconnectedRoom in unconnectedRooms)
+                {
+                    float distance = Vector3Int.Distance(connectedRoom.center, unconnectedRoom.center);
+                    
+                    if (distance < minDistance)
+                    {
+                        minDistance = distance;
+                        closestUnconnected = unconnectedRoom;
+                        closestConnected = connectedRoom;
+                    }
+                }
+            }
+            
+            if (closestUnconnected != null && closestConnected != null)
+            {
+                CreateGeometricCorridor(closestConnected, closestUnconnected);
+                connectedRooms.Add(closestUnconnected);
+                unconnectedRooms.Remove(closestUnconnected);
+            }
+        }
+    }
+    
+    private void CreateGeometricCorridor(CuboidRoom roomA, CuboidRoom roomB)
+    {
+        bool makeVertical = Random.value < verticalConnectionChance && 
+                           Mathf.Abs(roomA.center.y - roomB.center.y) > minRoomSize;
+        
+        Corridor corridor = new Corridor
+        {
+            id = nextCorridorId++,
+            roomAId = roomA.id,
+            roomBId = roomB.id,
+            isVertical = makeVertical,
+            width = Random.Range(minCorridorWidth, maxCorridorWidth + 1),
+            height = makeVertical ? verticalShaftSize : corridorHeight
+        };
+        
+        GenerateStraightCorridorPath(roomA, roomB, corridor);
+        
+        // INTENTIONAL: We don't check if corridor intersects other rooms
+        // This is a design choice - creates interesting overlaps
+        
+        allCorridors[corridor.id] = corridor;
+        RegisterCorridor(corridor);
+    }
+    
+    private void GenerateStraightCorridorPath(CuboidRoom roomA, CuboidRoom roomB, Corridor corridor)
+    {
+        Vector3Int pointA = GetGeometricConnectionPoint(roomA, roomB.center);
+        Vector3Int pointB = GetGeometricConnectionPoint(roomB, roomA.center);
+        
+        // FIXED: Corridor path at appropriate height
+        if (!corridor.isVertical)
+        {
+            // Horizontal corridors should be at floor level
+            pointA.y = roomA.minBounds.y;
+            pointB.y = roomB.minBounds.y;
+        }
+        
+        Vector3Int current = pointA;
+        corridor.path.Add(current);
+        
+        int xDir = Mathf.Clamp(pointB.x - pointA.x, -1, 1);
+        while (current.x != pointB.x)
+        {
+            current.x += xDir;
+            corridor.path.Add(current);
+        }
+        
+        int zDir = Mathf.Clamp(pointB.z - current.z, -1, 1);
+        while (current.z != pointB.z)
+        {
+            current.z += zDir;
+            corridor.path.Add(current);
+        }
+        
+        if (current.y != pointB.y)
+        {
+            int yDir = Mathf.Clamp(pointB.y - current.y, -1, 1);
+            while (current.y != pointB.y)
+            {
+                current.y += yDir;
+                corridor.path.Add(current);
+            }
+        }
+    }
+    
+    private Vector3Int GetGeometricConnectionPoint(CuboidRoom room, Vector3Int target)
+    {
+        float minDistance = float.MaxValue;
+        Vector3Int bestPoint = room.center;
+        
+        Vector3Int[] faceCenters = {
+            new Vector3Int(room.minBounds.x, room.center.y, room.center.z),
+            new Vector3Int(room.maxBounds.x, room.center.y, room.center.z),
+            new Vector3Int(room.center.x, room.minBounds.y, room.center.z),
+            new Vector3Int(room.center.x, room.maxBounds.y, room.center.z),
+            new Vector3Int(room.center.x, room.center.y, room.minBounds.z),
+            new Vector3Int(room.center.x, room.center.y, room.maxBounds.z)
+        };
+        
+        foreach (var faceCenter in faceCenters)
+        {
+            float distance = Vector3Int.Distance(faceCenter, target);
+            if (distance < minDistance)
+            {
+                minDistance = distance;
+                bestPoint = faceCenter;
+            }
+        }
+        
+        return bestPoint;
+    }
+    
+    private void CarveCuboidRoomIntoGrid(CuboidRoom room, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
     {
         Vector3Int localMin = room.minBounds - worldOffset;
         Vector3Int localMax = room.maxBounds - worldOffset;
         
-        // DON'T clamp to grid bounds - carve whatever part is in this chunk
-        // This allows rooms to extend beyond chunk boundaries
-        for (int x = Mathf.Max(localMin.x, 0); x <= Mathf.Min(localMax.x, chunkSize.x - 1); x++)
+        int startX = Mathf.Max(localMin.x, 0);
+        int endX = Mathf.Min(localMax.x, chunkSize.x - 1);
+        int startY = Mathf.Max(localMin.y, 0);
+        int endY = Mathf.Min(localMax.y, chunkSize.y - 1);
+        int startZ = Mathf.Max(localMin.z, 0);
+        int endZ = Mathf.Min(localMax.z, chunkSize.z - 1);
+        
+        for (int x = startX; x <= endX; x++)
         {
-            for (int y = Mathf.Max(localMin.y, 0); y <= Mathf.Min(localMax.y, chunkSize.y - 1); y++)
+            for (int y = startY; y <= endY; y++)
             {
-                for (int z = Mathf.Max(localMin.z, 0); z <= Mathf.Min(localMax.z, chunkSize.z - 1); z++)
+                for (int z = startZ; z <= endZ; z++)
                 {
                     grid[x, y, z] = true;
                 }
@@ -326,47 +634,35 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         }
     }
     
-    private void CarveConnectionIntoGridWithEdges(Connection connection, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
+    private void CarveGeometricCorridorIntoGrid(Corridor corridor, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
     {
-        foreach (var worldPoint in connection.path)
+        foreach (var worldPoint in corridor.path)
         {
-            Vector3Int localPoint = worldPoint - worldOffset;
+            Vector3Int localCenter = worldPoint - worldOffset;
+            int halfWidth = corridor.width / 2;
             
-            // Only carve if point is within or adjacent to this chunk
-            // This allows corridors to extend to edges
-            if (localPoint.x < -corridorWidth || localPoint.x >= chunkSize.x + corridorWidth ||
-                localPoint.y < -corridorHeight || localPoint.y >= chunkSize.y + corridorHeight ||
-                localPoint.z < -corridorWidth || localPoint.z >= chunkSize.z + corridorWidth)
-                continue;
-            
-            // Carve corridor around the path point
-            int halfWidth = connection.width / 2;
-            int startY = localPoint.y - (connection.isVertical ? 0 : connection.height / 2);
-            int endY = startY + (connection.isVertical ? connection.width : connection.height);
+            // FIXED: Corridor centered vertically on path point
+            int startY = localCenter.y - corridor.height / 2;
             
             for (int dx = -halfWidth; dx <= halfWidth; dx++)
             {
                 for (int dz = -halfWidth; dz <= halfWidth; dz++)
                 {
-                    for (int dy = 0; dy < (connection.isVertical ? connection.width : connection.height); dy++)
+                    for (int dy = 0; dy < corridor.height; dy++)
                     {
                         int y = startY + dy;
                         
-                        Vector3Int carvePos = new Vector3Int(
-                            localPoint.x + dx,
+                        Vector3Int localPos = new Vector3Int(
+                            localCenter.x + dx,
                             y,
-                            localPoint.z + dz
+                            localCenter.z + dz
                         );
                         
-                        // Convert to local chunk coordinates
-                        Vector3Int localCarvePos = carvePos; // Already local
-                        
-                        // Only carve if within chunk bounds
-                        if (localCarvePos.x >= 0 && localCarvePos.x < chunkSize.x &&
-                            localCarvePos.y >= 0 && localCarvePos.y < chunkSize.y &&
-                            localCarvePos.z >= 0 && localCarvePos.z < chunkSize.z)
+                        if (localPos.x >= 0 && localPos.x < chunkSize.x &&
+                            localPos.y >= 0 && localPos.y < chunkSize.y &&
+                            localPos.z >= 0 && localPos.z < chunkSize.z)
                         {
-                            grid[localCarvePos.x, localCarvePos.y, localCarvePos.z] = true;
+                            grid[localPos.x, localPos.y, localPos.z] = true;
                         }
                     }
                 }
@@ -374,288 +670,11 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         }
     }
     
-    private void ConnectRoomToNeighbors(CuboidRoom newRoom, Vector3Int chunkSize)
-    {
-        // Find nearby rooms (including in other chunks)
-        List<CuboidRoom> nearbyRooms = FindNearbyRooms(newRoom.center, maxGenerationRange * Mathf.Max(chunkSize.x, chunkSize.z));
-        
-        if (nearbyRooms.Count == 0) return;
-        
-        // Sort by distance
-        nearbyRooms.Sort((a, b) => 
-            Vector3Int.Distance(newRoom.center, a.center).CompareTo(
-            Vector3Int.Distance(newRoom.center, b.center)));
-        
-        // Connect to closest room
-        CuboidRoom closestRoom = nearbyRooms[0];
-        
-        if (!AreRoomsConnected(newRoom, closestRoom))
-        {
-            // Decide connection type
-            bool makeVertical = Random.value < verticalConnectionChance && 
-                               Mathf.Abs(newRoom.center.y - closestRoom.center.y) > minRoomSize;
-            
-            Connection connection = CreateConnectionBetween(newRoom, closestRoom, makeVertical, chunkSize);
-            if (connection != null)
-            {
-                RegisterConnection(connection, chunkSize);
-            }
-        }
-    }
-    
-    private Connection CreateConnectionBetween(CuboidRoom roomA, CuboidRoom roomB, bool vertical, Vector3Int chunkSize)
-    {
-        Connection connection = new Connection
-        {
-            id = nextConnectionId++,
-            roomAId = roomA.id,
-            roomBId = roomB.id,
-            isVertical = vertical,
-            width = corridorWidth,
-            height = vertical ? corridorWidth : corridorHeight
-        };
-        
-        if (vertical)
-        {
-            CreateVerticalConnection(roomA, roomB, connection);
-        }
-        else
-        {
-            CreateHorizontalConnection(roomA, roomB, connection, chunkSize);
-        }
-        
-        return connection.path.Count > 0 ? connection : null;
-    }
-    
-    private void CreateHorizontalConnection(CuboidRoom roomA, CuboidRoom roomB, Connection connection, Vector3Int chunkSize)
-    {
-        // Get connection points - PREFER POINTS AT CHUNK EDGES FOR CROSS-CHUNK CONNECTIONS
-        Vector3Int pointA = GetConnectionPointOnRoomWithEdgePreference(roomA, roomB.center, chunkSize);
-        Vector3Int pointB = GetConnectionPointOnRoomWithEdgePreference(roomB, roomA.center, chunkSize);
-        
-        // Ensure points are at least corridor width apart from room interiors
-        pointA = AdjustPointForCorridor(pointA, roomA, connection.width);
-        pointB = AdjustPointForCorridor(pointB, roomB, connection.width);
-        
-        // Create path that can cross chunk boundaries
-        List<Vector3Int> path = new List<Vector3Int>();
-        
-        // Start from pointA
-        Vector3Int current = pointA;
-        path.Add(current);
-        
-        // Move in X direction first (allows crossing chunk X boundaries)
-        int xDir = Mathf.Clamp(pointB.x - pointA.x, -1, 1);
-        while (current.x != pointB.x)
-        {
-            current.x += xDir;
-            path.Add(current);
-        }
-        
-        // Then move in Z direction (allows crossing chunk Z boundaries)
-        int zDir = Mathf.Clamp(pointB.z - current.z, -1, 1);
-        while (current.z != pointB.z)
-        {
-            current.z += zDir;
-            path.Add(current);
-        }
-        
-        // Finally adjust Y if needed
-        if (current.y != pointB.y)
-        {
-            int yDir = Mathf.Clamp(pointB.y - current.y, -1, 1);
-            while (current.y != pointB.y)
-            {
-                current.y += yDir;
-                path.Add(current);
-            }
-        }
-        
-        connection.path = path;
-    }
-    
-    private Vector3Int GetConnectionPointOnRoomWithEdgePreference(CuboidRoom room, Vector3Int target, Vector3Int chunkSize)
-    {
-        // Get all potential connection points on room faces
-        List<Vector3Int> facePoints = new List<Vector3Int>();
-        List<float> distances = new List<float>();
-        
-        // Generate points along each face
-        for (int x = room.minBounds.x; x <= room.maxBounds.x; x += Mathf.Max(1, room.size.x / 3))
-        {
-            // -Y face (floor)
-            facePoints.Add(new Vector3Int(x, room.minBounds.y, room.center.z));
-            distances.Add(Vector3Int.Distance(new Vector3Int(x, room.minBounds.y, room.center.z), target));
-            
-            // +Y face (ceiling)
-            facePoints.Add(new Vector3Int(x, room.maxBounds.y, room.center.z));
-            distances.Add(Vector3Int.Distance(new Vector3Int(x, room.maxBounds.y, room.center.z), target));
-        }
-        
-        for (int z = room.minBounds.z; z <= room.maxBounds.z; z += Mathf.Max(1, room.size.z / 3))
-        {
-            // -X face
-            facePoints.Add(new Vector3Int(room.minBounds.x, room.center.y, z));
-            distances.Add(Vector3Int.Distance(new Vector3Int(room.minBounds.x, room.center.y, z), target));
-            
-            // +X face
-            facePoints.Add(new Vector3Int(room.maxBounds.x, room.center.y, z));
-            distances.Add(Vector3Int.Distance(new Vector3Int(room.maxBounds.x, room.center.y, z), target));
-        }
-        
-        for (int y = room.minBounds.y; y <= room.maxBounds.y; y += Mathf.Max(1, room.size.y / 3))
-        {
-            // -Z face
-            facePoints.Add(new Vector3Int(room.center.x, y, room.minBounds.z));
-            distances.Add(Vector3Int.Distance(new Vector3Int(room.center.x, y, room.minBounds.z), target));
-            
-            // +Z face
-            facePoints.Add(new Vector3Int(room.center.x, y, room.maxBounds.z));
-            distances.Add(Vector3Int.Distance(new Vector3Int(room.center.x, y, room.maxBounds.z), target));
-        }
-        
-        // Prefer points at chunk boundaries for cross-chunk connections
-        float bestScore = float.MaxValue;
-        Vector3Int bestPoint = room.center;
-        
-        for (int i = 0; i < facePoints.Count; i++)
-        {
-            float distanceScore = distances[i];
-            
-            // Bonus for points at chunk boundaries
-            Vector3Int chunkCoord = WorldToChunkCoord(facePoints[i], chunkSize);
-            Vector3Int localPos = facePoints[i] - Vector3Int.Scale(chunkCoord, chunkSize);
-            
-            bool isAtChunkEdge = localPos.x == 0 || localPos.x == chunkSize.x - 1 ||
-                                localPos.z == 0 || localPos.z == chunkSize.z - 1;
-            
-            if (isAtChunkEdge && corridorsTouchEdges)
-            {
-                distanceScore *= 0.7f; // Prefer edge points
-            }
-            
-            if (distanceScore < bestScore)
-            {
-                bestScore = distanceScore;
-                bestPoint = facePoints[i];
-            }
-        }
-        
-        return bestPoint;
-    }
-    
-    private Vector3Int AdjustPointForCorridor(Vector3Int point, CuboidRoom room, int corridorWidth)
-    {
-        // Move point slightly outside the room to create corridor entrance
-        if (point.x == room.minBounds.x) point.x -= 1;
-        else if (point.x == room.maxBounds.x) point.x += 1;
-        else if (point.z == room.minBounds.z) point.z -= 1;
-        else if (point.z == room.maxBounds.z) point.z += 1;
-        else if (point.y == room.minBounds.y) point.y -= 1;
-        else if (point.y == room.maxBounds.y) point.y += 1;
-        
-        return point;
-    }
-    
-    private Vector3Int WorldToChunkCoord(Vector3Int worldPos, Vector3Int chunkSize)
-    {
-        return new Vector3Int(
-            Mathf.FloorToInt(worldPos.x / (float)chunkSize.x),
-            Mathf.FloorToInt(worldPos.y / (float)chunkSize.y),
-            Mathf.FloorToInt(worldPos.z / (float)chunkSize.z)
-        );
-    }
-    
-    // ... [Previous helper methods remain mostly the same, but ensure they allow edge generation]
-    
-    private float GetNoiseAt(Vector3Int worldPos)
-    {
-        return Mathf.PerlinNoise(
-            worldPos.x * noiseScale,
-            worldPos.y * noiseScale + worldPos.z * noiseScale * 0.5f
-        );
-    }
-    
-    private bool IsAreaOccupied(Vector3Int center, int checkSize)
-    {
-        Vector3Int checkMin = center - Vector3Int.one * (checkSize / 2);
-        Vector3Int checkMax = center + Vector3Int.one * (checkSize / 2);
-        
-        Vector3Int gridCell = GetSpatialGridCell(center);
-        
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            for (int dy = -1; dy <= 1; dy++)
-            {
-                for (int dz = -1; dz <= 1; dz++)
-                {
-                    Vector3Int neighborCell = gridCell + new Vector3Int(dx, dy, dz);
-                    if (roomSpatialGrid.TryGetValue(neighborCell, out HashSet<int> roomIds))
-                    {
-                        foreach (int roomId in roomIds)
-                        {
-                            CuboidRoom room = allRooms[roomId];
-                            if (room.Overlaps(new CuboidRoom(-1, checkMin, checkMax, Vector3Int.zero)))
-                                return true;
-                        }
-                    }
-                }
-            }
-        }
-        
-        return false;
-    }
-    
-    private Vector3Int GetSpatialGridCell(Vector3Int worldPos)
-    {
-        return new Vector3Int(
-            Mathf.FloorToInt(worldPos.x / (float)spatialGridSize),
-            Mathf.FloorToInt(worldPos.y / (float)spatialGridSize),
-            Mathf.FloorToInt(worldPos.z / (float)spatialGridSize)
-        );
-    }
-    
-    private bool CheckRoomOverlap(Vector3Int minBounds, Vector3Int maxBounds)
-    {
-        CuboidRoom testRoom = new CuboidRoom(-1, minBounds, maxBounds, Vector3Int.zero);
-        
-        Vector3Int gridMin = GetSpatialGridCell(minBounds);
-        Vector3Int gridMax = GetSpatialGridCell(maxBounds);
-        
-        for (int x = gridMin.x; x <= gridMax.x; x++)
-        {
-            for (int y = gridMin.y; y <= gridMax.y; y++)
-            {
-                for (int z = gridMin.z; z <= gridMax.z; z++)
-                {
-                    Vector3Int gridCell = new Vector3Int(x, y, z);
-                    if (roomSpatialGrid.TryGetValue(gridCell, out HashSet<int> roomIds))
-                    {
-                        foreach (int roomId in roomIds)
-                        {
-                            if (testRoom.Overlaps(allRooms[roomId]))
-                                return true;
-                        }
-                    }
-                }
-            }
-        }
-        
-        return false;
-    }
-    
-    private void RegisterRoom(CuboidRoom room, Vector3Int chunkSize)
+    private void RegisterRoom(CuboidRoom room)
     {
         allRooms[room.id] = room;
         
-        List<Vector3Int> occupiedChunks = room.GetOccupiedChunks(chunkSize);
-        foreach (var chunkCoord in occupiedChunks)
-        {
-            if (!chunkToRooms.ContainsKey(chunkCoord))
-                chunkToRooms[chunkCoord] = new HashSet<int>();
-            chunkToRooms[chunkCoord].Add(room.id);
-        }
-        
+        // Register in spatial grid
         Vector3Int gridMin = GetSpatialGridCell(room.minBounds);
         Vector3Int gridMax = GetSpatialGridCell(room.maxBounds);
         
@@ -672,96 +691,38 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 }
             }
         }
-    }
-    
-    private List<CuboidRoom> FindNearbyRooms(Vector3Int center, float maxDistance)
-    {
-        List<CuboidRoom> nearby = new List<CuboidRoom>();
         
-        Vector3Int gridCell = GetSpatialGridCell(center);
-        int gridRadius = Mathf.CeilToInt(maxDistance / spatialGridSize) + 1;
-        
-        for (int dx = -gridRadius; dx <= gridRadius; dx++)
-        {
-            for (int dy = -gridRadius; dy <= gridRadius; dy++)
-            {
-                for (int dz = -gridRadius; dz <= gridRadius; dz++)
-                {
-                    Vector3Int checkCell = gridCell + new Vector3Int(dx, dy, dz);
-                    if (roomSpatialGrid.TryGetValue(checkCell, out HashSet<int> roomIds))
-                    {
-                        foreach (int roomId in roomIds)
-                        {
-                            CuboidRoom room = allRooms[roomId];
-                            if (room.id != nextRoomId - 1 &&
-                                Vector3Int.Distance(center, room.center) <= maxDistance)
-                            {
-                                nearby.Add(room);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        return nearby;
-    }
-    
-    private bool AreRoomsConnected(CuboidRoom roomA, CuboidRoom roomB)
-    {
-        foreach (var connection in allConnections.Values)
-        {
-            if ((connection.roomAId == roomA.id && connection.roomBId == roomB.id) ||
-                (connection.roomAId == roomB.id && connection.roomBId == roomA.id))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    private void CreateVerticalConnection(CuboidRoom roomA, CuboidRoom roomB, Connection connection)
-    {
-        CuboidRoom lowerRoom = roomA.center.y < roomB.center.y ? roomA : roomB;
-        CuboidRoom upperRoom = roomA.center.y > roomB.center.y ? roomA : roomB;
-        
-        Vector3Int startPoint = new Vector3Int(
-            lowerRoom.center.x,
-            lowerRoom.maxBounds.y,
-            lowerRoom.center.z
-        );
-        
-        Vector3Int endPoint = new Vector3Int(
-            upperRoom.center.x,
-            upperRoom.minBounds.y,
-            upperRoom.center.z
-        );
-        
-        int currentY = startPoint.y;
-        while (currentY <= endPoint.y)
-        {
-            connection.path.Add(new Vector3Int(startPoint.x, currentY, startPoint.z));
-            currentY++;
-            
-            if (connection.path.Count > verticalShaftMaxHeight * 2)
-                break;
-        }
-    }
-    
-    private void RegisterConnection(Connection connection, Vector3Int chunkSize)
-    {
-        allConnections[connection.id] = connection;
-        
-        List<Vector3Int> occupiedChunks = connection.GetOccupiedChunks(chunkSize);
+        // Register with chunks
+        List<Vector3Int> occupiedChunks = room.GetOccupiedChunks(currentChunkSize);
         foreach (var chunkCoord in occupiedChunks)
         {
-            if (!chunkToConnections.ContainsKey(chunkCoord))
-                chunkToConnections[chunkCoord] = new HashSet<int>();
-            chunkToConnections[chunkCoord].Add(connection.id);
+            if (!chunkToRooms.ContainsKey(chunkCoord))
+                chunkToRooms[chunkCoord] = new HashSet<int>();
+            chunkToRooms[chunkCoord].Add(room.id);
         }
     }
     
-    private List<CuboidRoom> GetRoomsForChunk(Vector3Int chunkCoord, Vector3Int chunkSize)
+    private void RegisterCorridor(Corridor corridor)
+    {
+        List<Vector3Int> occupiedChunks = corridor.GetOccupiedChunks(currentChunkSize);
+        foreach (var chunkCoord in occupiedChunks)
+        {
+            if (!chunkToCorridors.ContainsKey(chunkCoord))
+                chunkToCorridors[chunkCoord] = new HashSet<int>();
+            chunkToCorridors[chunkCoord].Add(corridor.id);
+        }
+    }
+    
+    private Vector3Int GetSpatialGridCell(Vector3Int worldPos)
+    {
+        return new Vector3Int(
+            Mathf.FloorToInt(worldPos.x / (float)spatialGridSize),
+            Mathf.FloorToInt(worldPos.y / (float)spatialGridSize),
+            Mathf.FloorToInt(worldPos.z / (float)spatialGridSize)
+        );
+    }
+    
+    private List<CuboidRoom> GetRoomsForChunkDirect(Vector3Int chunkCoord)
     {
         List<CuboidRoom> rooms = new List<CuboidRoom>();
         
@@ -769,7 +730,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         {
             foreach (int roomId in roomIds)
             {
-                if (allRooms.TryGetValue(roomId, out CuboidRoom room))
+                if (allRooms.TryGetValue(roomId, out CuboidRoom room) && room.isActive)
                     rooms.Add(room);
             }
         }
@@ -777,20 +738,20 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         return rooms;
     }
     
-    private List<Connection> GetConnectionsForChunk(Vector3Int chunkCoord, Vector3Int chunkSize)
+    private List<Corridor> GetCorridorsForChunkDirect(Vector3Int chunkCoord)
     {
-        List<Connection> connections = new List<Connection>();
+        List<Corridor> corridors = new List<Corridor>();
         
-        if (chunkToConnections.TryGetValue(chunkCoord, out HashSet<int> connectionIds))
+        if (chunkToCorridors.TryGetValue(chunkCoord, out HashSet<int> corridorIds))
         {
-            foreach (int connectionId in connectionIds)
+            foreach (int corridorId in corridorIds)
             {
-                if (allConnections.TryGetValue(connectionId, out Connection connection))
-                    connections.Add(connection);
+                if (allCorridors.TryGetValue(corridorId, out Corridor corridor) && corridor.isActive)
+                    corridors.Add(corridor);
             }
         }
         
-        return connections;
+        return corridors;
     }
     
     private void ClearGrid(ref bool[,,] grid, Vector3Int chunkSize)
@@ -806,8 +767,138 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         }
     }
     
+    // FIXED: Memory management - prune distant rooms
+    public void PruneDistantData(Vector3Int centerChunk)
+    {
+        lock (generationLock)
+        {
+            // Mark distant rooms as inactive
+            foreach (var room in allRooms.Values)
+            {
+                if (room.isActive)
+                {
+                    Vector3Int roomCenterChunk = WorldToChunkCoord(room.center, currentChunkSize);
+                    int distance = GetChunkDistance(roomCenterChunk, centerChunk);
+                    
+                    if (distance > pruneRadius)
+                    {
+                        room.isActive = false;
+                        
+                        // Remove from spatial grid
+                        RemoveRoomFromSpatialGrid(room);
+                        
+                        // Remove from chunk mappings
+                        List<Vector3Int> occupiedChunks = room.GetOccupiedChunks(currentChunkSize);
+                        foreach (var chunkCoord in occupiedChunks)
+                        {
+                            if (chunkToRooms.TryGetValue(chunkCoord, out HashSet<int> roomIds))
+                            {
+                                roomIds.Remove(room.id);
+                                if (roomIds.Count == 0)
+                                    chunkToRooms.Remove(chunkCoord);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Mark distant corridors as inactive
+            foreach (var corridor in allCorridors.Values)
+            {
+                if (corridor.isActive && corridor.path.Count > 0)
+                {
+                    Vector3Int corridorCenterChunk = WorldToChunkCoord(corridor.path[corridor.path.Count / 2], currentChunkSize);
+                    int distance = GetChunkDistance(corridorCenterChunk, centerChunk);
+                    
+                    if (distance > pruneRadius)
+                    {
+                        corridor.isActive = false;
+                        
+                        // Remove from chunk mappings
+                        List<Vector3Int> occupiedChunks = corridor.GetOccupiedChunks(currentChunkSize);
+                        foreach (var chunkCoord in occupiedChunks)
+                        {
+                            if (chunkToCorridors.TryGetValue(chunkCoord, out HashSet<int> corridorIds))
+                            {
+                                corridorIds.Remove(corridor.id);
+                                if (corridorIds.Count == 0)
+                                    chunkToCorridors.Remove(chunkCoord);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Optionally: Remove completely if too many inactive items
+            if (allRooms.Count > maxRoomsToKeep * 2)
+            {
+                RemoveInactiveRooms();
+            }
+        }
+    }
+    
+    private void RemoveRoomFromSpatialGrid(CuboidRoom room)
+    {
+        Vector3Int gridMin = GetSpatialGridCell(room.minBounds);
+        Vector3Int gridMax = GetSpatialGridCell(room.maxBounds);
+        
+        for (int x = gridMin.x; x <= gridMax.x; x++)
+        {
+            for (int y = gridMin.y; y <= gridMax.y; y++)
+            {
+                for (int z = gridMin.z; z <= gridMax.z; z++)
+                {
+                    Vector3Int gridCell = new Vector3Int(x, y, z);
+                    if (roomSpatialGrid.TryGetValue(gridCell, out HashSet<int> roomIds))
+                    {
+                        roomIds.Remove(room.id);
+                        if (roomIds.Count == 0)
+                            roomSpatialGrid.Remove(gridCell);
+                    }
+                }
+            }
+        }
+    }
+    
+    private void RemoveInactiveRooms()
+    {
+        List<int> roomsToRemove = new List<int>();
+        
+        foreach (var kvp in allRooms)
+        {
+            if (!kvp.Value.isActive)
+                roomsToRemove.Add(kvp.Key);
+        }
+        
+        foreach (int roomId in roomsToRemove)
+        {
+            allRooms.Remove(roomId);
+        }
+    }
+    
+    private Vector3Int WorldToChunkCoord(Vector3Int worldPos, Vector3Int chunkSize)
+    {
+        return new Vector3Int(
+            Mathf.FloorToInt(worldPos.x / (float)chunkSize.x),
+            Mathf.FloorToInt(worldPos.y / (float)chunkSize.y),
+            Mathf.FloorToInt(worldPos.z / (float)chunkSize.z)
+        );
+    }
+    
+    private int GetChunkDistance(Vector3Int a, Vector3Int b)
+    {
+        return Mathf.Max(
+            Mathf.Abs(a.x - b.x),
+            Mathf.Abs(a.y - b.y),
+            Mathf.Abs(a.z - b.z)
+        );
+    }
+    
     public void ClearChunkData(Vector3Int chunkCoord)
     {
-        initializedChunks.Remove(chunkCoord);
+        lock (generationLock)
+        {
+            processedChunks.Remove(chunkCoord);
+        }
     }
 }

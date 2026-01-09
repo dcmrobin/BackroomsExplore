@@ -422,7 +422,11 @@ public class DungeonChunk : MonoBehaviour
     
     private bool IsSolidInAdjacentChunk(int x, int y, int z, Vector3Int direction)
     {
-        if (chunkManager == null) return false;
+        if (chunkManager == null) 
+        {
+            chunkManager = FindObjectOfType<InfiniteChunkManager>();
+            if (chunkManager == null) return false;
+        }
         
         // Calculate which adjacent chunk we need to check
         Vector3Int adjacentChunkCoord = chunkCoord;
@@ -564,39 +568,48 @@ public class DungeonChunk : MonoBehaviour
     
     private void ApplyMesh(MeshData meshData)
     {
-        if (meshData.vertices.Count == 0)
+        if (meshData == null || meshData.vertices.Count == 0) // FIXED: null check
         {
-            meshFilter.mesh = null;
-            meshCollider.sharedMesh = null;
+            if (meshFilter != null) meshFilter.mesh = null;
+            if (meshCollider != null) meshCollider.sharedMesh = null;
             return;
         }
         
-        Mesh mesh = new Mesh();
-        
-        if (meshData.vertices.Count > 65535)
-            mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-            
-        mesh.vertices = meshData.vertices.ToArray();
-        mesh.triangles = meshData.triangles.ToArray();
-        mesh.uv = meshData.uv.ToArray();
-        mesh.colors = meshData.colors.ToArray();
-        mesh.normals = meshData.normals.ToArray();
-        
-        mesh.RecalculateBounds();
-        mesh.Optimize();
-        
-        meshFilter.mesh = mesh;
-        meshCollider.sharedMesh = mesh;
-        
-        // Apply textures if available
-        if (meshRenderer.material != null)
+        try
         {
-            if (wallTexture != null)
-                meshRenderer.material.SetTexture("_WallTex", wallTexture);
-            if (floorTexture != null)
-                meshRenderer.material.SetTexture("_FloorTex", floorTexture);
-            if (ceilingTexture != null)
-                meshRenderer.material.SetTexture("_CeilingTex", ceilingTexture);
+            Mesh mesh = new Mesh();
+            
+            if (meshData.vertices.Count > 65535)
+                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                
+            mesh.vertices = meshData.vertices.ToArray();
+            mesh.triangles = meshData.triangles.ToArray();
+            mesh.uv = meshData.uv.ToArray();
+            mesh.colors = meshData.colors.ToArray();
+            mesh.normals = meshData.normals.ToArray();
+            
+            mesh.RecalculateBounds();
+            
+            // FIXED: Only optimize if not empty
+            if (mesh.vertexCount > 0)
+                mesh.Optimize();
+            
+            if (meshFilter != null) meshFilter.mesh = mesh;
+            if (meshCollider != null) meshCollider.sharedMesh = mesh;
+            
+            if (meshRenderer != null && meshRenderer.material != null)
+            {
+                if (wallTexture != null)
+                    meshRenderer.material.SetTexture("_WallTex", wallTexture);
+                if (floorTexture != null)
+                    meshRenderer.material.SetTexture("_FloorTex", floorTexture);
+                if (ceilingTexture != null)
+                    meshRenderer.material.SetTexture("_CeilingTex", ceilingTexture);
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Error applying mesh: {e.Message}");
         }
     }
     

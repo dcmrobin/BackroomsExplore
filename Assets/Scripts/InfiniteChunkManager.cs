@@ -11,6 +11,7 @@ public class InfiniteChunkManager : MonoBehaviour
     [Header("Generation Settings")]
     [SerializeField] private int maxChunksPerFrame = 1;
     [SerializeField] private bool cancelDistantGeneration = true;
+    [SerializeField] private bool asyncGeneration = false; // NEW: Option for async
     
     [Header("References")]
     [SerializeField] private DungeonChunk chunkPrefab;
@@ -25,64 +26,128 @@ public class InfiniteChunkManager : MonoBehaviour
     private Queue<DungeonChunk> chunkPool = new Queue<DungeonChunk>();
     private Transform chunkContainer;
     
-    // Generation queues with priorities
-    private PriorityQueue<ChunkGenerationJob> generationQueue = new PriorityQueue<ChunkGenerationJob>();
+    // Generation queues with priorities - FIXED: Using binary heap
+    private BinaryHeap<ChunkGenerationJob> generationQueue = new BinaryHeap<ChunkGenerationJob>();
     private HashSet<Vector3Int> currentlyGenerating = new HashSet<Vector3Int>();
     
     // State
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
     private Vector3Int lastPlayerChunkCoord = Vector3Int.zero;
     
-    private class ChunkGenerationJob
+    // FIXED: Track chunks that need boundary updates
+    private HashSet<Vector3Int> chunksNeedingBoundaryUpdate = new HashSet<Vector3Int>();
+    
+    private class ChunkGenerationJob : System.IComparable<ChunkGenerationJob>
     {
         public Vector3Int chunkCoord;
         public int priority; // Lower number = higher priority
         public float timestamp;
+        
+        public int CompareTo(ChunkGenerationJob other)
+        {
+            // Primary sort by priority, secondary by timestamp (FIFO for same priority)
+            int priorityCompare = priority.CompareTo(other.priority);
+            if (priorityCompare != 0)
+                return priorityCompare;
+            return timestamp.CompareTo(other.timestamp);
+        }
     }
     
-    private class PriorityQueue<T> where T : ChunkGenerationJob
+    // FIXED: Binary heap for O(log n) operations
+    private class BinaryHeap<T> where T : System.IComparable<T>
     {
-        private List<T> items = new List<T>();
+        private List<T> heap = new List<T>();
         
         public void Enqueue(T item)
         {
-            items.Add(item);
-            items.Sort((a, b) => a.priority.CompareTo(b.priority));
+            heap.Add(item);
+            int i = heap.Count - 1;
+            while (i > 0)
+            {
+                int parent = (i - 1) / 2;
+                if (heap[i].CompareTo(heap[parent]) >= 0)
+                    break;
+                    
+                // Swap
+                T temp = heap[i];
+                heap[i] = heap[parent];
+                heap[parent] = temp;
+                i = parent;
+            }
         }
         
         public bool TryDequeue(out T item)
         {
-            if (items.Count == 0)
+            if (heap.Count == 0)
             {
-                item = null;
+                item = default;
                 return false;
             }
             
-            item = items[0];
-            items.RemoveAt(0);
+            item = heap[0];
+            int lastIndex = heap.Count - 1;
+            heap[0] = heap[lastIndex];
+            heap.RemoveAt(lastIndex);
+            
+            if (heap.Count > 0)
+                Heapify(0);
+                
             return true;
+        }
+        
+        private void Heapify(int i)
+        {
+            int smallest = i;
+            int left = 2 * i + 1;
+            int right = 2 * i + 2;
+            
+            if (left < heap.Count && heap[left].CompareTo(heap[smallest]) < 0)
+                smallest = left;
+                
+            if (right < heap.Count && heap[right].CompareTo(heap[smallest]) < 0)
+                smallest = right;
+                
+            if (smallest != i)
+            {
+                T temp = heap[i];
+                heap[i] = heap[smallest];
+                heap[smallest] = temp;
+                Heapify(smallest);
+            }
         }
         
         public bool ContainsCoord(Vector3Int coord)
         {
-            foreach (var item in items)
+            foreach (var item in heap)
             {
-                if (item.chunkCoord == coord) return true;
+                if (item is ChunkGenerationJob job && job.chunkCoord == coord)
+                    return true;
             }
             return false;
         }
         
         public void RemoveCoord(Vector3Int coord)
         {
-            items.RemoveAll(item => item.chunkCoord == coord);
+            for (int i = 0; i < heap.Count; i++)
+            {
+                if (heap[i] is ChunkGenerationJob job && job.chunkCoord == coord)
+                {
+                    heap[i] = heap[heap.Count - 1];
+                    heap.RemoveAt(heap.Count - 1);
+                    
+                    if (i < heap.Count)
+                        Heapify(i);
+                    break;
+                }
+            }
         }
         
         public void Clear()
         {
-            items.Clear();
+            heap.Clear();
         }
         
-        public int Count => items.Count;
+        public int Count => heap.Count;
     }
     
     void Start()
@@ -98,7 +163,6 @@ public class InfiniteChunkManager : MonoBehaviour
         if (roomGenerator == null)
             roomGenerator = gameObject.AddComponent<CrossChunkRoomGenerator>();
         
-        // Initialize the generator with chunk size
         roomGenerator.Initialize(chunkSize);
         
         chunkContainer = new GameObject("Chunks").transform;
@@ -114,14 +178,22 @@ public class InfiniteChunkManager : MonoBehaviour
         
         UpdatePlayerChunk();
         
-        // Only update queue if player moved to new chunk
         if (currentPlayerChunkCoord != lastPlayerChunkCoord)
         {
             UpdateGenerationQueue();
             lastPlayerChunkCoord = currentPlayerChunkCoord;
+            
+            // FIXED: Prune distant data when player moves far
+            if (GetChunkDistance(currentPlayerChunkCoord, lastPlayerChunkCoord) > 2)
+            {
+                roomGenerator.PruneDistantData(currentPlayerChunkCoord);
+            }
         }
         
         ProcessGenerationQueue();
+        
+        // FIXED: Process boundary updates
+        ProcessBoundaryUpdates();
     }
     
     private void UpdatePlayerChunk()
@@ -137,6 +209,9 @@ public class InfiniteChunkManager : MonoBehaviour
     
     private void UpdateGenerationQueue()
     {
+        // Clear any pending generation for now-out-of-range chunks
+        generationQueue.Clear();
+        
         // Add new chunks to generate
         for (int x = -renderDistance; x <= renderDistance; x++)
         {
@@ -146,13 +221,10 @@ public class InfiniteChunkManager : MonoBehaviour
                 {
                     Vector3Int chunkCoord = currentPlayerChunkCoord + new Vector3Int(x, y, z);
                     
-                    // Skip if already loaded or being generated
                     if (loadedChunks.ContainsKey(chunkCoord) || 
-                        currentlyGenerating.Contains(chunkCoord) ||
-                        generationQueue.ContainsCoord(chunkCoord))
+                        currentlyGenerating.Contains(chunkCoord))
                         continue;
                     
-                    // Calculate priority based on distance
                     int distance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
                     int priority = CalculatePriority(distance, chunkCoord);
                     
@@ -166,7 +238,7 @@ public class InfiniteChunkManager : MonoBehaviour
             }
         }
         
-        // Remove chunks that are now out of range
+        // Unload distant chunks
         List<Vector3Int> chunksToUnload = new List<Vector3Int>();
         foreach (var kvp in loadedChunks)
         {
@@ -185,17 +257,9 @@ public class InfiniteChunkManager : MonoBehaviour
     
     private int CalculatePriority(int distance, Vector3Int chunkCoord)
     {
-        // Priority levels:
-        // 0: Player's current chunk
-        // 1: Immediate neighbors (distance = 1)
-        // 2: Chunks at distance = 2
-        // 3+: Further chunks
-        
         if (distance == 0) return 0;
         if (distance == 1) return 1;
         if (distance == 2) return 2;
-        
-        // Further chunks get lower priority
         return 3 + distance;
     }
     
@@ -207,70 +271,132 @@ public class InfiniteChunkManager : MonoBehaviour
         {
             if (generationQueue.TryDequeue(out ChunkGenerationJob job))
             {
-                // Check if this chunk is still within range
                 int currentDistance = GetChunkDistance(job.chunkCoord, currentPlayerChunkCoord);
                 
                 if (cancelDistantGeneration && currentDistance > renderDistance + 1)
                 {
-                    // Skip this chunk - it's now too far away
                     currentlyGenerating.Remove(job.chunkCoord);
                     continue;
                 }
                 
                 currentlyGenerating.Add(job.chunkCoord);
-                GenerateChunkImmediate(job.chunkCoord);
+                
+                if (asyncGeneration)
+                {
+                    // Could use Unity's Job System or async/await here
+                    GenerateChunkImmediate(job.chunkCoord);
+                }
+                else
+                {
+                    GenerateChunkImmediate(job.chunkCoord);
+                }
+                
                 currentlyGenerating.Remove(job.chunkCoord);
                 chunksProcessed++;
             }
         }
     }
     
+    private void ProcessBoundaryUpdates()
+    {
+        if (chunksNeedingBoundaryUpdate.Count == 0) return;
+        
+        // Process a few per frame to avoid spikes
+        int maxUpdates = Mathf.Min(3, chunksNeedingBoundaryUpdate.Count);
+        List<Vector3Int> toProcess = new List<Vector3Int>();
+        
+        foreach (var coord in chunksNeedingBoundaryUpdate)
+        {
+            toProcess.Add(coord);
+            if (toProcess.Count >= maxUpdates) break;
+        }
+        
+        foreach (var coord in toProcess)
+        {
+            chunksNeedingBoundaryUpdate.Remove(coord);
+            UpdateChunkBoundaryMeshes(coord);
+        }
+    }
+    
     private void GenerateChunkImmediate(Vector3Int chunkCoord)
     {
-        // Quick check: is this chunk still needed?
         int currentDistance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
         if (cancelDistantGeneration && currentDistance > renderDistance)
-        {
-            // Don't generate - chunk is now out of range
             return;
-        }
         
         if (loadedChunks.ContainsKey(chunkCoord)) return;
         
         DungeonChunk chunk = GetChunkFromPool();
-        Vector3 worldPos = ChunkCoordToWorld(chunkCoord);
-        chunk.transform.position = worldPos;
-        chunk.transform.SetParent(chunkContainer);
-        chunk.name = $"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}";
-        
-        // Set chunk coordinate for cross-chunk checks
-        chunk.SetChunkCoord(chunkCoord);
-        
-        // Set material
-        MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
-        if (renderer != null && chunkMaterial != null)
+        if (chunk == null)
         {
-            renderer.material = new Material(chunkMaterial);
+            Debug.LogWarning("Failed to get chunk from pool");
+            return;
         }
         
-        // Generate or retrieve chunk data
-        if (!chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+        try
         {
-            voxelGrid = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
-            roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelGrid);
-            chunkVoxelCache[chunkCoord] = voxelGrid;
+            Vector3 worldPos = ChunkCoordToWorld(chunkCoord);
+            chunk.transform.position = worldPos;
+            chunk.transform.SetParent(chunkContainer);
+            chunk.name = $"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}";
+            
+            chunk.SetChunkCoord(chunkCoord);
+            
+            MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
+            if (renderer != null && chunkMaterial != null)
+            {
+                renderer.material = new Material(chunkMaterial);
+            }
+            
+            if (!chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+            {
+                voxelGrid = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
+                roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelGrid);
+                chunkVoxelCache[chunkCoord] = voxelGrid;
+                
+                // Mark adjacent chunks for boundary updates
+                MarkAdjacentChunksForUpdate(chunkCoord);
+            }
+            
+            chunk.Initialize(chunkSize);
+            chunk.GenerateMesh(voxelGrid);
+            
+            loadedChunks[chunkCoord] = chunk;
         }
-        
-        // Generate mesh
-        chunk.Initialize(chunkSize);
-        chunk.GenerateMesh(voxelGrid);
-        
-        loadedChunks[chunkCoord] = chunk;
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Error generating chunk {chunkCoord}: {e.Message}");
+            ReturnChunkToPool(chunk);
+        }
     }
     
-    // NEW METHOD: Allows chunks to query voxel data from other chunks
+    private void MarkAdjacentChunksForUpdate(Vector3Int newChunkCoord)
+    {
+        Vector3Int[] directions = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+        
+        foreach (var dir in directions)
+        {
+            Vector3Int adjacentCoord = newChunkCoord + dir;
+            if (loadedChunks.ContainsKey(adjacentCoord))
+            {
+                chunksNeedingBoundaryUpdate.Add(adjacentCoord);
+            }
+        }
+    }
+    
     public bool TryGetVoxelData(Vector3Int chunkCoord, Vector3Int localPos, out bool isSolid)
     {
+        // FIXED: Check if chunk is currently generating
+        if (currentlyGenerating.Contains(chunkCoord))
+        {
+            isSolid = true; // Conservative: assume solid while generating
+            return false;
+        }
+        
         if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
         {
             if (localPos.x >= 0 && localPos.x < chunkSize.x &&
@@ -286,32 +412,20 @@ public class InfiniteChunkManager : MonoBehaviour
         return false;
     }
     
-    // NEW METHOD: Get direct access to a chunk's voxel grid
-    public bool[,,] GetChunkVoxelGrid(Vector3Int chunkCoord)
-    {
-        if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
-        {
-            return voxelGrid;
-        }
-        return null;
-    }
-    
-    // NEW METHOD: Update chunk mesh when adjacent chunks load/unload
     public void UpdateChunkBoundaryMeshes(Vector3Int chunkCoord)
     {
         if (loadedChunks.TryGetValue(chunkCoord, out DungeonChunk chunk))
         {
-            // Get the voxel grid for this chunk
             if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
             {
-                // Regenerate mesh with updated boundary information
                 chunk.GenerateMesh(voxelGrid);
             }
         }
     }
     
-    private Vector3Int WorldToChunkCoord(Vector3 worldPos)
+    public Vector3Int WorldToChunkCoord(Vector3 worldPos)
     {
+        // FIXED: Proper handling of negative coordinates
         return new Vector3Int(
             Mathf.FloorToInt(worldPos.x / chunkSize.x),
             Mathf.FloorToInt(worldPos.y / chunkSize.y),
@@ -344,16 +458,13 @@ public class InfiniteChunkManager : MonoBehaviour
             ReturnChunkToPool(chunk);
             loadedChunks.Remove(chunkCoord);
             
-            // Clear generator data for this chunk
             roomGenerator.ClearChunkData(chunkCoord);
             chunkVoxelCache.Remove(chunkCoord);
             
-            // Update adjacent chunks that might have been relying on this chunk
             UpdateAdjacentChunks(chunkCoord);
         }
     }
     
-    // NEW METHOD: Update adjacent chunks when a chunk unloads
     private void UpdateAdjacentChunks(Vector3Int unloadedChunkCoord)
     {
         Vector3Int[] directions = {
@@ -365,7 +476,7 @@ public class InfiniteChunkManager : MonoBehaviour
         foreach (var dir in directions)
         {
             Vector3Int adjacentCoord = unloadedChunkCoord + dir;
-            UpdateChunkBoundaryMeshes(adjacentCoord);
+            chunksNeedingBoundaryUpdate.Add(adjacentCoord);
         }
     }
     
@@ -377,7 +488,7 @@ public class InfiniteChunkManager : MonoBehaviour
             return;
         }
         
-        for (int i = 0; i < 15; i++) // Larger pool for faster chunk swapping
+        for (int i = 0; i < 15; i++)
         {
             DungeonChunk chunk = Instantiate(chunkPrefab);
             chunk.gameObject.SetActive(false);
@@ -393,15 +504,22 @@ public class InfiniteChunkManager : MonoBehaviour
             chunk.gameObject.SetActive(true);
             return chunk;
         }
-        else
+        else if (useObjectPooling)
         {
+            // Pool empty, expand it
             DungeonChunk chunk = Instantiate(chunkPrefab);
             return chunk;
+        }
+        else
+        {
+            return Instantiate(chunkPrefab);
         }
     }
     
     private void ReturnChunkToPool(DungeonChunk chunk)
     {
+        if (chunk == null) return;
+        
         if (useObjectPooling)
         {
             chunk.Clear();
@@ -412,23 +530,5 @@ public class InfiniteChunkManager : MonoBehaviour
         {
             Destroy(chunk.gameObject);
         }
-    }
-    
-    void OnDrawGizmosSelected()
-    {
-        if (!Application.isPlaying) return;
-        
-        // Draw loaded chunks
-        Gizmos.color = new Color(0, 1, 0, 0.3f);
-        foreach (var kvp in loadedChunks)
-        {
-            Vector3 center = ChunkCoordToWorld(kvp.Key) + (Vector3)chunkSize * 0.5f;
-            Gizmos.DrawWireCube(center, chunkSize);
-        }
-        
-        // Draw player chunk
-        Gizmos.color = Color.red;
-        Vector3 playerChunkCenter = ChunkCoordToWorld(currentPlayerChunkCoord) + (Vector3)chunkSize * 0.5f;
-        Gizmos.DrawWireCube(playerChunkCenter, chunkSize);
     }
 }
