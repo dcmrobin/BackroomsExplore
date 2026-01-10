@@ -11,7 +11,11 @@ public class InfiniteChunkManager : MonoBehaviour
     [Header("Generation Settings")]
     [SerializeField] private int maxChunksPerFrame = 1;
     [SerializeField] private bool cancelDistantGeneration = true;
-    [SerializeField] private bool asyncGeneration = false; // NEW: Option for async
+    [SerializeField] private bool asyncGeneration = false;
+    
+    [Header("Seed Settings")]
+    [SerializeField] private int worldSeed = 123456;
+    [SerializeField] private bool randomizeSeed = true;
     
     [Header("References")]
     [SerializeField] private DungeonChunk chunkPrefab;
@@ -26,7 +30,7 @@ public class InfiniteChunkManager : MonoBehaviour
     private Queue<DungeonChunk> chunkPool = new Queue<DungeonChunk>();
     private Transform chunkContainer;
     
-    // Generation queues with priorities - FIXED: Using binary heap
+    // Generation queues with priorities
     private BinaryHeap<ChunkGenerationJob> generationQueue = new BinaryHeap<ChunkGenerationJob>();
     private HashSet<Vector3Int> currentlyGenerating = new HashSet<Vector3Int>();
     
@@ -34,7 +38,7 @@ public class InfiniteChunkManager : MonoBehaviour
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
     private Vector3Int lastPlayerChunkCoord = Vector3Int.zero;
     
-    // FIXED: Track chunks that need boundary updates
+    // Track chunks that need boundary updates
     private HashSet<Vector3Int> chunksNeedingBoundaryUpdate = new HashSet<Vector3Int>();
     
     private class ChunkGenerationJob : System.IComparable<ChunkGenerationJob>
@@ -53,7 +57,6 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
     
-    // FIXED: Binary heap for O(log n) operations
     private class BinaryHeap<T> where T : System.IComparable<T>
     {
         private List<T> heap = new List<T>();
@@ -152,6 +155,13 @@ public class InfiniteChunkManager : MonoBehaviour
     
     void Start()
     {
+        // Initialize seed
+        if (randomizeSeed)
+        {
+            worldSeed = Random.Range(int.MinValue, int.MaxValue);
+        }
+        Debug.Log($"World seed: {worldSeed}");
+        
         if (playerTransform == null)
         {
             GameObject player = GameObject.FindGameObjectWithTag("Player");
@@ -163,7 +173,7 @@ public class InfiniteChunkManager : MonoBehaviour
         if (roomGenerator == null)
             roomGenerator = gameObject.AddComponent<CrossChunkRoomGenerator>();
         
-        roomGenerator.Initialize(chunkSize);
+        roomGenerator.Initialize(chunkSize, worldSeed);
         
         chunkContainer = new GameObject("Chunks").transform;
         chunkContainer.SetParent(transform);
@@ -183,7 +193,6 @@ public class InfiniteChunkManager : MonoBehaviour
             UpdateGenerationQueue();
             lastPlayerChunkCoord = currentPlayerChunkCoord;
             
-            // FIXED: Prune distant data when player moves far
             if (GetChunkDistance(currentPlayerChunkCoord, lastPlayerChunkCoord) > 2)
             {
                 roomGenerator.PruneDistantData(currentPlayerChunkCoord);
@@ -192,7 +201,6 @@ public class InfiniteChunkManager : MonoBehaviour
         
         ProcessGenerationQueue();
         
-        // FIXED: Process boundary updates
         ProcessBoundaryUpdates();
     }
     
@@ -209,10 +217,8 @@ public class InfiniteChunkManager : MonoBehaviour
     
     private void UpdateGenerationQueue()
     {
-        // Clear any pending generation for now-out-of-range chunks
         generationQueue.Clear();
         
-        // Add new chunks to generate
         for (int x = -renderDistance; x <= renderDistance; x++)
         {
             for (int y = -1; y <= 1; y++)
@@ -238,7 +244,6 @@ public class InfiniteChunkManager : MonoBehaviour
             }
         }
         
-        // Unload distant chunks
         List<Vector3Int> chunksToUnload = new List<Vector3Int>();
         foreach (var kvp in loadedChunks)
         {
@@ -283,7 +288,6 @@ public class InfiniteChunkManager : MonoBehaviour
                 
                 if (asyncGeneration)
                 {
-                    // Could use Unity's Job System or async/await here
                     GenerateChunkImmediate(job.chunkCoord);
                 }
                 else
@@ -301,7 +305,6 @@ public class InfiniteChunkManager : MonoBehaviour
     {
         if (chunksNeedingBoundaryUpdate.Count == 0) return;
         
-        // Process a few per frame to avoid spikes
         int maxUpdates = Mathf.Min(3, chunksNeedingBoundaryUpdate.Count);
         List<Vector3Int> toProcess = new List<Vector3Int>();
         
@@ -340,7 +343,7 @@ public class InfiniteChunkManager : MonoBehaviour
             chunk.transform.SetParent(chunkContainer);
             chunk.name = $"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}";
             
-            chunk.SetChunkCoord(chunkCoord);
+            chunk.SetChunkCoord(chunkCoord, worldSeed);
             
             MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
             if (renderer != null && chunkMaterial != null)
@@ -354,7 +357,6 @@ public class InfiniteChunkManager : MonoBehaviour
                 roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelGrid);
                 chunkVoxelCache[chunkCoord] = voxelGrid;
                 
-                // Mark adjacent chunks for boundary updates
                 MarkAdjacentChunksForUpdate(chunkCoord);
             }
             
@@ -390,10 +392,9 @@ public class InfiniteChunkManager : MonoBehaviour
     
     public bool TryGetVoxelData(Vector3Int chunkCoord, Vector3Int localPos, out bool isSolid)
     {
-        // FIXED: Check if chunk is currently generating
         if (currentlyGenerating.Contains(chunkCoord))
         {
-            isSolid = true; // Conservative: assume solid while generating
+            isSolid = true;
             return false;
         }
         
@@ -425,7 +426,6 @@ public class InfiniteChunkManager : MonoBehaviour
     
     public Vector3Int WorldToChunkCoord(Vector3 worldPos)
     {
-        // FIXED: Proper handling of negative coordinates
         return new Vector3Int(
             Mathf.FloorToInt(worldPos.x / chunkSize.x),
             Mathf.FloorToInt(worldPos.y / chunkSize.y),
@@ -506,7 +506,6 @@ public class InfiniteChunkManager : MonoBehaviour
         }
         else if (useObjectPooling)
         {
-            // Pool empty, expand it
             DungeonChunk chunk = Instantiate(chunkPrefab);
             return chunk;
         }

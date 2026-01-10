@@ -321,6 +321,8 @@ MonoBehaviour:
   maxChunksPerFrame: 1
   cancelDistantGeneration: 1
   asyncGeneration: 0
+  worldSeed: 123456
+  randomizeSeed: 1
   chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
   playerTransform: {fileID: 1585999911}
   chunkMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}

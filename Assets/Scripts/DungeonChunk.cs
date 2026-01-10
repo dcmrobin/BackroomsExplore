@@ -30,6 +30,7 @@ public class DungeonChunk : MonoBehaviour
     // Reference to the chunk manager for cross-chunk checks
     private InfiniteChunkManager chunkManager;
     private Vector3Int chunkCoord;
+    private int worldSeed; // NEW: Store world seed for deterministic lighting
     
     // Material IDs (must match shader)
     private const byte MATERIAL_WALL = 0;
@@ -56,9 +57,10 @@ public class DungeonChunk : MonoBehaviour
         chunkManager = FindObjectOfType<InfiniteChunkManager>();
     }
     
-    public void SetChunkCoord(Vector3Int coord)
+    public void SetChunkCoord(Vector3Int coord, int seed)
     {
         chunkCoord = coord;
+        worldSeed = seed; // Store the world seed
     }
     
     public void GenerateMesh(bool[,,] grid)
@@ -80,6 +82,10 @@ public class DungeonChunk : MonoBehaviour
     {
         lightPositions.Clear();
         
+        // Create a deterministic random based on world seed and chunk coordinates
+        int chunkSeed = GetChunkSeed();
+        System.Random deterministicRandom = new System.Random(chunkSeed);
+        
         // Find rooms (solid areas) and place lights
         for (int x = 0; x < chunkSize.x; x++)
         {
@@ -100,14 +106,81 @@ public class DungeonChunk : MonoBehaviour
                             }
                         }
                         
-                        if (isCeiling && Random.value < lightPlacementChance)
+                        if (isCeiling)
                         {
-                            lightPositions.Add(new Vector3Int(x, y, z));
+                            // Create a deterministic hash for this specific position
+                            int positionHash = GetPositionHash(x, y, z);
+                            
+                            // Use the hash to create a deterministic random generator for this position
+                            System.Random positionRandom = new System.Random(positionHash);
+                            
+                            // Get deterministic value between 0 and 1
+                            float deterministicValue = (float)positionRandom.NextDouble();
+                            
+                            if (deterministicValue < lightPlacementChance)
+                            {
+                                lightPositions.Add(new Vector3Int(x, y, z));
+                            }
                         }
                     }
                 }
             }
         }
+        
+        // Ensure at least some lights per room if rooms exist
+        if (lightPositions.Count == 0)
+        {
+            // Find ceiling positions to add at least one light
+            List<Vector3Int> ceilingPositions = new List<Vector3Int>();
+            for (int x = 0; x < chunkSize.x; x++)
+            {
+                for (int y = 0; y < chunkSize.y; y++)
+                {
+                    for (int z = 0; z < chunkSize.z; z++)
+                    {
+                        if (voxelGrid[x, y, z])
+                        {
+                            if (y == chunkSize.y - 1 || !voxelGrid[x, y + 1, z])
+                            {
+                                if (y > 0 && voxelGrid[x, y - 1, z])
+                                {
+                                    ceilingPositions.Add(new Vector3Int(x, y, z));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (ceilingPositions.Count > 0)
+            {
+                // Use deterministic selection based on chunk seed
+                int index = deterministicRandom.Next(ceilingPositions.Count);
+                lightPositions.Add(ceilingPositions[index]);
+            }
+        }
+    }
+    
+    private int GetChunkSeed()
+    {
+        // Combine world seed with chunk coordinates for a unique but deterministic seed
+        // Using prime numbers to reduce collisions
+        return worldSeed ^ (chunkCoord.x * 73856093) ^ (chunkCoord.y * 19349663) ^ (chunkCoord.z * 83492791);
+    }
+    
+    private int GetPositionHash(int x, int y, int z)
+    {
+        // Create a unique hash for a specific position within this chunk
+        // This ensures the same position always gets the same "random" value
+        int hash = 17;
+        hash = hash * 31 + worldSeed;
+        hash = hash * 31 + chunkCoord.x;
+        hash = hash * 31 + chunkCoord.y;
+        hash = hash * 31 + chunkCoord.z;
+        hash = hash * 31 + x;
+        hash = hash * 31 + y;
+        hash = hash * 31 + z;
+        return hash;
     }
     
     private void CalculateVoxelLighting()
@@ -409,13 +482,11 @@ public class DungeonChunk : MonoBehaviour
         
         if (IsInGrid(adjPos))
         {
-            // If adjacent voxel is solid in this chunk, don't generate face
             return !voxelGrid[adjPos.x, adjPos.y, adjPos.z];
         }
         else
         {
             // This voxel is at a chunk boundary
-            // Need to check adjacent chunk
             return !IsSolidInAdjacentChunk(x, y, z, direction);
         }
     }
@@ -476,8 +547,6 @@ public class DungeonChunk : MonoBehaviour
         }
         
         // If adjacent chunk isn't loaded, we can't know for sure
-        // Conservative approach: assume it's solid so we generate the face
-        // This might create double walls at chunk boundaries until neighbor loads
         return false;
     }
     
@@ -568,7 +637,7 @@ public class DungeonChunk : MonoBehaviour
     
     private void ApplyMesh(MeshData meshData)
     {
-        if (meshData == null || meshData.vertices.Count == 0) // FIXED: null check
+        if (meshData == null || meshData.vertices.Count == 0)
         {
             if (meshFilter != null) meshFilter.mesh = null;
             if (meshCollider != null) meshCollider.sharedMesh = null;
@@ -590,7 +659,6 @@ public class DungeonChunk : MonoBehaviour
             
             mesh.RecalculateBounds();
             
-            // FIXED: Only optimize if not empty
             if (mesh.vertexCount > 0)
                 mesh.Optimize();
             
