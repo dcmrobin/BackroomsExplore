@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Unity.Collections;
 
 public class DungeonChunk : MonoBehaviour
 {
@@ -23,7 +24,7 @@ public class DungeonChunk : MonoBehaviour
     private MeshRenderer meshRenderer;
     private MeshCollider meshCollider;
     
-    private bool[,,] voxelGrid;
+    private NativeArray<byte> voxelData;
     private float[,,] lightGrid;
     private Vector3Int chunkSize;
     private List<Vector3Int> lightPositions = new List<Vector3Int>();
@@ -40,7 +41,7 @@ public class DungeonChunk : MonoBehaviour
     private const byte MATERIAL_LIGHT = 3;
     
     // Optimized arrays for faster access
-    private bool[] voxelGridFlat;
+    private byte[] voxelDataArray; // Temp managed array for easier access
     private float[] lightGridFlat;
     
     // Vertex lighting data - stores light value for each vertex position
@@ -58,9 +59,8 @@ public class DungeonChunk : MonoBehaviour
         if (meshRenderer == null) meshRenderer = gameObject.AddComponent<MeshRenderer>();
         if (meshCollider == null) meshCollider = gameObject.AddComponent<MeshCollider>();
         
-        // Initialize flat arrays for faster access
+        // Initialize flat array for lighting
         int voxelCount = size.x * size.y * size.z;
-        voxelGridFlat = new bool[voxelCount];
         lightGridFlat = new float[voxelCount];
     }
     
@@ -74,12 +74,14 @@ public class DungeonChunk : MonoBehaviour
     
     public Vector3 GetChunkWorldPosition() => transform.position;
     
-    public void GenerateMesh(bool[,,] grid)
+    public void GenerateMesh(NativeArray<byte> voxelData)
     {
-        voxelGrid = grid;
+        this.voxelData = voxelData;
         
-        // Convert to flat array for performance
-        ConvertToFlatArray(grid);
+        // Convert to managed array for performance (optional, but easier to work with)
+        int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
+        voxelDataArray = new byte[voxelCount];
+        voxelData.CopyTo(voxelDataArray);
         
         // Place lights
         PlaceLights();
@@ -98,37 +100,6 @@ public class DungeonChunk : MonoBehaviour
         }
     }
     
-    private void ConvertToFlatArray(bool[,,] grid)
-    {
-        int index = 0;
-        for (int x = 0; x < chunkSize.x; x++)
-        {
-            for (int y = 0; y < chunkSize.y; y++)
-            {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    voxelGridFlat[index++] = grid[x, y, z];
-                }
-            }
-        }
-    }
-    
-    private void ConvertFromFlatArray()
-    {
-        int index = 0;
-        lightGrid = new float[chunkSize.x, chunkSize.y, chunkSize.z];
-        for (int x = 0; x < chunkSize.x; x++)
-        {
-            for (int y = 0; y < chunkSize.y; y++)
-            {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    lightGrid[x, y, z] = lightGridFlat[index++];
-                }
-            }
-        }
-    }
-    
     private void PlaceLights()
     {
         lightPositions.Clear();
@@ -139,10 +110,9 @@ public class DungeonChunk : MonoBehaviour
         
         int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
         
-        // Pre-calculate indices for performance
         for (int i = 0; i < totalVoxels; i++)
         {
-            if (voxelGridFlat[i])
+            if (voxelDataArray[i] != 0) // Solid voxel
             {
                 Vector3Int coord = IndexToCoord(i);
                 int x = coord.x;
@@ -187,7 +157,7 @@ public class DungeonChunk : MonoBehaviour
             
             for (int i = 0; i < totalVoxels; i++)
             {
-                if (voxelGridFlat[i])
+                if (voxelDataArray[i] != 0)
                 {
                     Vector3Int coord = IndexToCoord(i);
                     int x = coord.x;
@@ -257,7 +227,7 @@ public class DungeonChunk : MonoBehaviour
             // Parallel processing for performance
             Parallel.For(0, totalVoxels, i =>
             {
-                if (voxelGridFlat[i]) return;
+                if (voxelDataArray[i] != 0) return; // Skip solid voxels
                 
                 Vector3Int coord = IndexToCoord(i);
                 float maxNeighborLight = 0f;
@@ -266,42 +236,42 @@ public class DungeonChunk : MonoBehaviour
                 if (coord.x > 0)
                 {
                     int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
-                    if (!voxelGridFlat[leftIndex])
+                    if (voxelDataArray[leftIndex] == 0) // Empty voxel
                         maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[leftIndex]);
                 }
                 
                 if (coord.x < chunkSize.x - 1)
                 {
                     int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
-                    if (!voxelGridFlat[rightIndex])
+                    if (voxelDataArray[rightIndex] == 0)
                         maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[rightIndex]);
                 }
                 
                 if (coord.y > 0)
                 {
                     int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
-                    if (!voxelGridFlat[downIndex])
+                    if (voxelDataArray[downIndex] == 0)
                         maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[downIndex]);
                 }
                 
                 if (coord.y < chunkSize.y - 1)
                 {
                     int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
-                    if (!voxelGridFlat[upIndex])
+                    if (voxelDataArray[upIndex] == 0)
                         maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[upIndex]);
                 }
                 
                 if (coord.z > 0)
                 {
                     int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
-                    if (!voxelGridFlat[backIndex])
+                    if (voxelDataArray[backIndex] == 0)
                         maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[backIndex]);
                 }
                 
                 if (coord.z < chunkSize.z - 1)
                 {
                     int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
-                    if (!voxelGridFlat[forwardIndex])
+                    if (voxelDataArray[forwardIndex] == 0)
                         maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[forwardIndex]);
                 }
                 
@@ -318,7 +288,7 @@ public class DungeonChunk : MonoBehaviour
         // Solid voxels receive light from adjacent empty voxels
         Parallel.For(0, totalVoxels, i =>
         {
-            if (!voxelGridFlat[i]) return;
+            if (voxelDataArray[i] == 0) return; // Skip empty voxels
             
             Vector3Int coord = IndexToCoord(i);
             
@@ -344,42 +314,42 @@ public class DungeonChunk : MonoBehaviour
             if (coord.x > 0)
             {
                 int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
-                if (!voxelGridFlat[leftIndex])
+                if (voxelDataArray[leftIndex] == 0)
                     maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[leftIndex]);
             }
             
             if (coord.x < chunkSize.x - 1)
             {
                 int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
-                if (!voxelGridFlat[rightIndex])
+                if (voxelDataArray[rightIndex] == 0)
                     maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[rightIndex]);
             }
             
             if (coord.y > 0)
             {
                 int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
-                if (!voxelGridFlat[downIndex])
+                if (voxelDataArray[downIndex] == 0)
                     maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[downIndex]);
             }
             
             if (coord.y < chunkSize.y - 1)
             {
                 int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
-                if (!voxelGridFlat[upIndex])
+                if (voxelDataArray[upIndex] == 0)
                     maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[upIndex]);
             }
             
             if (coord.z > 0)
             {
                 int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
-                if (!voxelGridFlat[backIndex])
+                if (voxelDataArray[backIndex] == 0)
                     maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[backIndex]);
             }
             
             if (coord.z < chunkSize.z - 1)
             {
                 int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
-                if (!voxelGridFlat[forwardIndex])
+                if (voxelDataArray[forwardIndex] == 0)
                     maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[forwardIndex]);
             }
             
@@ -406,7 +376,7 @@ public class DungeonChunk : MonoBehaviour
         
         for (int i = 0; i < totalVoxels; i++)
         {
-            if (voxelGridFlat[i])
+            if (voxelDataArray[i] != 0)
             {
                 Vector3Int coord = IndexToCoord(i);
                 AddFlatLitFaces(coord.x, coord.y, coord.z, meshData);
@@ -435,7 +405,7 @@ public class DungeonChunk : MonoBehaviour
         
         for (int i = 0; i < totalVoxels; i++)
         {
-            if (voxelGridFlat[i])
+            if (voxelDataArray[i] != 0)
             {
                 Vector3Int coord = IndexToCoord(i);
                 AddSmoothLitFaces(coord.x, coord.y, coord.z, meshData);
@@ -863,7 +833,7 @@ public class DungeonChunk : MonoBehaviour
             if (meshFilter != null) meshFilter.mesh = mesh;
             if (meshCollider != null) meshCollider.sharedMesh = mesh;
             
-            if (meshRenderer != null && meshRenderer.material != null)
+            /*if (meshRenderer != null && meshRenderer.material != null)
             {
                 if (wallTexture != null)
                     meshRenderer.material.SetTexture("_WallTex", wallTexture);
@@ -871,11 +841,27 @@ public class DungeonChunk : MonoBehaviour
                     meshRenderer.material.SetTexture("_FloorTex", floorTexture);
                 if (ceilingTexture != null)
                     meshRenderer.material.SetTexture("_CeilingTex", ceilingTexture);
-            }
+            }*/ // Textures are already set in the shader inspector as default
         }
         catch (System.Exception e)
         {
             Debug.LogError($"Error applying mesh: {e.Message}");
+        }
+    }
+    
+    private void ConvertFromFlatArray()
+    {
+        int index = 0;
+        lightGrid = new float[chunkSize.x, chunkSize.y, chunkSize.z];
+        for (int x = 0; x < chunkSize.x; x++)
+        {
+            for (int y = 0; y < chunkSize.y; y++)
+            {
+                for (int z = 0; z < chunkSize.z; z++)
+                {
+                    lightGrid[x, y, z] = lightGridFlat[index++];
+                }
+            }
         }
     }
     
@@ -892,7 +878,7 @@ public class DungeonChunk : MonoBehaviour
         if (x < 0 || x >= chunkSize.x || y < 0 || y >= chunkSize.y || z < 0 || z >= chunkSize.z)
             return false;
         
-        return voxelGridFlat[CoordToIndex(x, y, z)];
+        return voxelDataArray[CoordToIndex(x, y, z)] != 0;
     }
     
     private int CoordToIndex(int x, int y, int z)
@@ -935,19 +921,18 @@ public class DungeonChunk : MonoBehaviour
         if (meshCollider != null && meshCollider.sharedMesh != null)
             meshCollider.sharedMesh = null;
             
-        voxelGrid = null;
         lightGrid = null;
         lightPositions.Clear();
-        voxelGridFlat = null;
+        voxelDataArray = null;
         lightGridFlat = null;
         vertexLightCache.Clear();
     }
     
     public void UpdateBoundaryMeshes()
     {
-        if (voxelGrid != null)
+        if (voxelData.IsCreated)
         {
-            GenerateMesh(voxelGrid);
+            GenerateMesh(voxelData);
         }
     }
     

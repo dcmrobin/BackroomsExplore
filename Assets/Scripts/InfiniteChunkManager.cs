@@ -30,7 +30,7 @@ public class InfiniteChunkManager : MonoBehaviour
     
     // Chunk storage
     private Dictionary<int, DungeonChunk> loadedChunks = new Dictionary<int, DungeonChunk>();
-    private Dictionary<int, bool[,,]> chunkVoxelCache = new Dictionary<int, bool[,,]>();
+    private Dictionary<int, NativeArray<byte>> chunkVoxelCache = new Dictionary<int, NativeArray<byte>>();
     private Queue<DungeonChunk> chunkPool = new Queue<DungeonChunk>();
     private Transform chunkContainer;
     
@@ -189,6 +189,17 @@ public class InfiniteChunkManager : MonoBehaviour
         
         InitializeObjectPool();
         UpdateGenerationQueue();
+    }
+    
+    void OnDestroy()
+    {
+        // Clean up all NativeArrays
+        foreach (var kvp in chunkVoxelCache)
+        {
+            if (kvp.Value.IsCreated)
+                kvp.Value.Dispose();
+        }
+        chunkVoxelCache.Clear();
     }
     
     void Update()
@@ -365,23 +376,18 @@ public class InfiniteChunkManager : MonoBehaviour
             
             chunk.SetChunkCoord(chunkCoord, worldSeed);
             
-            /*MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
-            if (renderer != null && chunkMaterial != null)
+            if (!chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
             {
-                renderer.material = new Material(chunkMaterial);
-            }*/ // Don't need this, as I have already set the material in the prefab inspector
-            
-            if (!chunkVoxelCache.TryGetValue(chunkHash, out bool[,,] voxelGrid))
-            {
-                voxelGrid = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
-                roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelGrid);
-                chunkVoxelCache[chunkHash] = voxelGrid;
+                int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
+                voxelData = new NativeArray<byte>(voxelCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+                roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelData);
+                chunkVoxelCache[chunkHash] = voxelData;
                 
                 MarkAdjacentChunksForUpdate(chunkCoord);
             }
             
             chunk.Initialize(chunkSize);
-            chunk.GenerateMesh(voxelGrid);
+            chunk.GenerateMesh(voxelData);
             
             loadedChunks[chunkHash] = chunk;
         }
@@ -422,13 +428,14 @@ public class InfiniteChunkManager : MonoBehaviour
             return false;
         }
         
-        if (chunkVoxelCache.TryGetValue(chunkHash, out bool[,,] voxelGrid))
+        if (chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
         {
             if (localPos.x >= 0 && localPos.x < chunkSize.x &&
                 localPos.y >= 0 && localPos.y < chunkSize.y &&
                 localPos.z >= 0 && localPos.z < chunkSize.z)
             {
-                isSolid = voxelGrid[localPos.x, localPos.y, localPos.z];
+                int index = localPos.x * (chunkSize.y * chunkSize.z) + localPos.y * chunkSize.z + localPos.z;
+                isSolid = voxelData[index] != 0;
                 return true;
             }
         }
@@ -472,7 +479,13 @@ public class InfiniteChunkManager : MonoBehaviour
             loadedChunks.Remove(chunkHash);
             
             roomGenerator.ClearChunkData(chunk.GetChunkCoord());
-            chunkVoxelCache.Remove(chunkHash);
+            
+            if (chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
+            {
+                if (voxelData.IsCreated)
+                    voxelData.Dispose();
+                chunkVoxelCache.Remove(chunkHash);
+            }
             
             UpdateAdjacentChunks(chunk.GetChunkCoord());
         }

@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
+using Unity.Collections;
 
 public class CrossChunkRoomGenerator : MonoBehaviour
 {
@@ -211,7 +212,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         nextCorridorId = 0;
     }
     
-    public void GenerateForChunk(Vector3Int chunkCoord, Vector3Int chunkSize, ref bool[,,] finalGrid)
+    public void GenerateForChunk(Vector3Int chunkCoord, Vector3Int chunkSize, ref NativeArray<byte> finalGrid)
     {
         lock (generationLock)
         {
@@ -641,7 +642,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         return bestPoint;
     }
     
-    private void CarveCuboidRoomIntoGrid(CuboidRoom room, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
+    private void CarveCuboidRoomIntoGrid(CuboidRoom room, Vector3Int worldOffset, Vector3Int chunkSize, ref NativeArray<byte> grid)
     {
         Vector3Int localMin = room.minBounds - worldOffset;
         Vector3Int localMax = room.maxBounds - worldOffset;
@@ -659,13 +660,14 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             {
                 for (int z = startZ; z <= endZ; z++)
                 {
-                    grid[x, y, z] = true;
+                    int index = x * (chunkSize.y * chunkSize.z) + y * chunkSize.z + z;
+                    grid[index] = 1; // Set to solid
                 }
             }
         }
     }
     
-    private void CarveGeometricCorridorIntoGrid(Corridor corridor, Vector3Int worldOffset, Vector3Int chunkSize, ref bool[,,] grid)
+    private void CarveGeometricCorridorIntoGrid(Corridor corridor, Vector3Int worldOffset, Vector3Int chunkSize, ref NativeArray<byte> grid)
     {
         foreach (var worldPoint in corridor.path)
         {
@@ -692,7 +694,8 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                             localPos.y >= 0 && localPos.y < chunkSize.y &&
                             localPos.z >= 0 && localPos.z < chunkSize.z)
                         {
-                            grid[localPos.x, localPos.y, localPos.z] = true;
+                            int index = localPos.x * (chunkSize.y * chunkSize.z) + localPos.y * chunkSize.z + localPos.z;
+                            grid[index] = 1; // Set to solid
                         }
                     }
                 }
@@ -782,16 +785,23 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         return corridors;
     }
     
-    private void ClearGrid(ref bool[,,] grid, Vector3Int chunkSize)
+    private void ClearGrid(ref NativeArray<byte> grid, Vector3Int chunkSize)
     {
-        if (grid == null || grid.GetLength(0) != chunkSize.x || 
-            grid.GetLength(1) != chunkSize.y || grid.GetLength(2) != chunkSize.z)
+        int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
+        
+        if (!grid.IsCreated || grid.Length != voxelCount)
         {
-            grid = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
+            if (grid.IsCreated)
+                grid.Dispose();
+            grid = new NativeArray<byte>(voxelCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
         }
         else
         {
-            System.Array.Clear(grid, 0, grid.Length);
+            // Clear existing grid
+            for (int i = 0; i < voxelCount; i++)
+            {
+                grid[i] = 0;
+            }
         }
     }
     
