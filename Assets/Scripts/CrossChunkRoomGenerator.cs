@@ -336,7 +336,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         Vector3Int currentMax = room.center;
         bool[] expansionBlocked = new bool[6];
         
-        // Randomize expansion order for variety but keep it deterministic
+        // Start with all directions
         List<int> directionOrder = new List<int> { 0, 1, 2, 3, 4, 5 };
         directionOrder = directionOrder.OrderBy(x => chunkRandom.Next()).ToList();
         
@@ -344,23 +344,29 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         {
             bool expanded = false;
             
-            foreach (int dirIndex in directionOrder)
+            // Filter out blocked directions at the start of each step
+            var activeDirections = directionOrder.Where(dir => !expansionBlocked[dir]).ToList();
+            
+            if (activeDirections.Count == 0)
+                break; // All directions are blocked
+                
+            foreach (int dirIndex in activeDirections)
             {
-                if (!expansionBlocked[dirIndex])
+                Vector3Int direction = IndexToDirection(dirIndex);
+                if (TryExpandDirection(room, ref currentMin, ref currentMax, direction, chunkRandom))
                 {
-                    Vector3Int direction = IndexToDirection(dirIndex);
-                    if (TryExpandDirection(room, ref currentMin, ref currentMax, direction, chunkRandom))
-                    {
-                        expanded = true;
-                        directionOrder = directionOrder.OrderBy(x => chunkRandom.Next()).ToList();
-                        break;
-                    }
-                    else
-                    {
-                        expansionBlocked[dirIndex] = true;
-                    }
+                    expanded = true;
+                    // Reshuffle only active directions after successful expansion
+                    activeDirections = activeDirections.OrderBy(x => chunkRandom.Next()).ToList();
+                }
+                else
+                {
+                    expansionBlocked[dirIndex] = true;
                 }
             }
+            
+            // Update directionOrder with new active directions for next iteration
+            directionOrder = activeDirections;
             
             if (!expanded || RoomExceedsMaxSize(currentMin, currentMax))
                 break;
