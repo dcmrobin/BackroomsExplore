@@ -15,8 +15,8 @@ Shader "Custom/DungeonTextureShader"
         _TextureScale ("Texture Scale", Vector) = (1, 1, 0, 0)
         
         // Smooth lighting parameters
-        _LightSmoothness ("Light Smoothness", Range(0, 1)) = 0.5
-        _LightContrast ("Light Contrast", Range(0.5, 2)) = 1.0
+        //_LightSmoothness ("Light Smoothness", Range(0, 1)) = 0.5
+        //_LightContrast ("Light Contrast", Range(0.5, 2)) = 1.0
     }
     
     SubShader

@@ -353,23 +353,23 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 22251ba5f91e0d940a944f7640209e11, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  noiseScale: {x: 0.025, y: 0.025, z: 0.025}
+  noiseScale: {x: 0.06, y: 0.06, z: 0.06}
   noiseOffset: {x: 0, y: 0, z: 0}
   useNoiseCache: 1
   roomThreshold: 0.8
-  roomExpansionThreshold: 0.35
+  roomExpansionThreshold: 0.55
   minRoomSize: 7
   maxRoomSize: 30
-  roomScanStep: 2
-  maxExpansionSteps: 40
+  roomScanStep: 4
+  maxExpansionSteps: 20
   expansionStepSize: 1
-  expandToGrid: 0
+  expandToGrid: 1
   gridAlignment: 2
   minCorridorWidth: 3
   maxCorridorWidth: 5
   corridorHeight: 4
   verticalShaftSize: 3
-  verticalConnectionChance: 0.4
+  verticalConnectionChance: 0.3
   maxRoomsToKeep: 1000
   pruneRadius: 10
 --- !u!1660057539 &9223372036854775807
