@@ -359,9 +359,9 @@ MonoBehaviour:
   roomThreshold: 0.8
   roomExpansionThreshold: 0.35
   minRoomSize: 7
-  maxRoomSize: 20
+  maxRoomSize: 30
   roomScanStep: 2
-  maxExpansionSteps: 20
+  maxExpansionSteps: 40
   expansionStepSize: 1
   expandToGrid: 0
   gridAlignment: 2

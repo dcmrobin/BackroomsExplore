@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 public class DungeonChunk : MonoBehaviour
 {
@@ -30,13 +31,17 @@ public class DungeonChunk : MonoBehaviour
     // Reference to the chunk manager for cross-chunk checks
     private InfiniteChunkManager chunkManager;
     private Vector3Int chunkCoord;
-    private int worldSeed; // NEW: Store world seed for deterministic lighting
+    private int worldSeed;
     
     // Material IDs (must match shader)
     private const byte MATERIAL_WALL = 0;
     private const byte MATERIAL_FLOOR = 1;
     private const byte MATERIAL_CEILING = 2;
     private const byte MATERIAL_LIGHT = 3;
+    
+    // Optimized arrays for faster access
+    private bool[] voxelGridFlat;
+    private float[] lightGridFlat;
     
     public void Initialize(Vector3Int size)
     {
@@ -50,32 +55,68 @@ public class DungeonChunk : MonoBehaviour
         if (meshRenderer == null) meshRenderer = gameObject.AddComponent<MeshRenderer>();
         if (meshCollider == null) meshCollider = gameObject.AddComponent<MeshCollider>();
         
-        // Initialize light grid
-        lightGrid = new float[size.x, size.y, size.z];
-        
-        // Get reference to chunk manager
-        chunkManager = FindObjectOfType<InfiniteChunkManager>();
+        // Initialize flat arrays for faster access
+        int voxelCount = size.x * size.y * size.z;
+        voxelGridFlat = new bool[voxelCount];
+        lightGridFlat = new float[voxelCount];
     }
     
     public void SetChunkCoord(Vector3Int coord, int seed)
     {
         chunkCoord = coord;
-        worldSeed = seed; // Store the world seed
+        worldSeed = seed;
     }
+    
+    public Vector3Int GetChunkCoord() => chunkCoord;
+    
+    public Vector3 GetChunkWorldPosition() => transform.position;
     
     public void GenerateMesh(bool[,,] grid)
     {
         voxelGrid = grid;
         
-        // Place lights in the chunk
+        // Convert to flat array for performance
+        ConvertToFlatArray(grid);
+        
+        // Place lights
         PlaceLights();
         
-        // Calculate lighting
-        CalculateVoxelLighting();
+        // Calculate lighting (optimized)
+        CalculateVoxelLightingOptimized();
         
         // Generate mesh with lighting data
-        var meshData = GenerateLitMesh();
-        ApplyMesh(meshData);
+        GenerateLitMeshOptimized();
+    }
+    
+    private void ConvertToFlatArray(bool[,,] grid)
+    {
+        int index = 0;
+        for (int x = 0; x < chunkSize.x; x++)
+        {
+            for (int y = 0; y < chunkSize.y; y++)
+            {
+                for (int z = 0; z < chunkSize.z; z++)
+                {
+                    voxelGridFlat[index++] = grid[x, y, z];
+                }
+            }
+        }
+    }
+    
+    private void ConvertFromFlatArray()
+    {
+        int index = 0;
+        lightGrid = new float[chunkSize.x, chunkSize.y, chunkSize.z];
+        for (int x = 0; x < chunkSize.x; x++)
+        {
+            for (int y = 0; y < chunkSize.y; y++)
+            {
+                for (int z = 0; z < chunkSize.z; z++)
+                {
+                    lightGrid[x, y, z] = lightGridFlat[index++];
+                }
+            }
+        }
     }
     
     private void PlaceLights()
@@ -86,42 +127,43 @@ public class DungeonChunk : MonoBehaviour
         int chunkSeed = GetChunkSeed();
         System.Random deterministicRandom = new System.Random(chunkSeed);
         
-        // Find rooms (solid areas) and place lights
-        for (int x = 0; x < chunkSize.x; x++)
+        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
+        
+        // Pre-calculate indices for performance
+        for (int i = 0; i < totalVoxels; i++)
         {
-            for (int y = 0; y < chunkSize.y; y++)
+            if (voxelGridFlat[i])
             {
-                for (int z = 0; z < chunkSize.z; z++)
+                Vector3Int coord = IndexToCoord(i);
+                int x = coord.x;
+                int y = coord.y;
+                int z = coord.z;
+                
+                // Check if this is a ceiling voxel (solid below, empty above or at top)
+                bool isCeiling = false;
+                if (y == chunkSize.y - 1 || !GetVoxel(x, y + 1, z))
                 {
-                    if (voxelGrid[x, y, z])
+                    // Make sure there's floor below
+                    if (y > 0 && GetVoxel(x, y - 1, z))
                     {
-                        // Check if this is a ceiling voxel (solid below, empty above or at top)
-                        bool isCeiling = false;
-                        if (y == chunkSize.y - 1 || !voxelGrid[x, y + 1, z])
-                        {
-                            // Make sure there's floor below
-                            if (y > 0 && voxelGrid[x, y - 1, z])
-                            {
-                                isCeiling = true;
-                            }
-                        }
-                        
-                        if (isCeiling)
-                        {
-                            // Create a deterministic hash for this specific position
-                            int positionHash = GetPositionHash(x, y, z);
-                            
-                            // Use the hash to create a deterministic random generator for this position
-                            System.Random positionRandom = new System.Random(positionHash);
-                            
-                            // Get deterministic value between 0 and 1
-                            float deterministicValue = (float)positionRandom.NextDouble();
-                            
-                            if (deterministicValue < lightPlacementChance)
-                            {
-                                lightPositions.Add(new Vector3Int(x, y, z));
-                            }
-                        }
+                        isCeiling = true;
+                    }
+                }
+                
+                if (isCeiling)
+                {
+                    // Create a deterministic hash for this specific position
+                    int positionHash = GetPositionHash(x, y, z);
+                    
+                    // Use the hash to create a deterministic random generator for this position
+                    System.Random positionRandom = new System.Random(positionHash);
+                    
+                    // Get deterministic value between 0 and 1
+                    float deterministicValue = (float)positionRandom.NextDouble();
+                    
+                    if (deterministicValue < lightPlacementChance)
+                    {
+                        lightPositions.Add(new Vector3Int(x, y, z));
                     }
                 }
             }
@@ -132,21 +174,21 @@ public class DungeonChunk : MonoBehaviour
         {
             // Find ceiling positions to add at least one light
             List<Vector3Int> ceilingPositions = new List<Vector3Int>();
-            for (int x = 0; x < chunkSize.x; x++)
+            
+            for (int i = 0; i < totalVoxels; i++)
             {
-                for (int y = 0; y < chunkSize.y; y++)
+                if (voxelGridFlat[i])
                 {
-                    for (int z = 0; z < chunkSize.z; z++)
+                    Vector3Int coord = IndexToCoord(i);
+                    int x = coord.x;
+                    int y = coord.y;
+                    int z = coord.z;
+                    
+                    if (y == chunkSize.y - 1 || !GetVoxel(x, y + 1, z))
                     {
-                        if (voxelGrid[x, y, z])
+                        if (y > 0 && GetVoxel(x, y - 1, z))
                         {
-                            if (y == chunkSize.y - 1 || !voxelGrid[x, y + 1, z])
-                            {
-                                if (y > 0 && voxelGrid[x, y - 1, z])
-                                {
-                                    ceilingPositions.Add(new Vector3Int(x, y, z));
-                                }
-                            }
+                            ceilingPositions.Add(new Vector3Int(x, y, z));
                         }
                     }
                 }
@@ -161,46 +203,21 @@ public class DungeonChunk : MonoBehaviour
         }
     }
     
-    private int GetChunkSeed()
+    private void CalculateVoxelLightingOptimized()
     {
-        // Combine world seed with chunk coordinates for a unique but deterministic seed
-        // Using prime numbers to reduce collisions
-        return worldSeed ^ (chunkCoord.x * 73856093) ^ (chunkCoord.y * 19349663) ^ (chunkCoord.z * 83492791);
-    }
-    
-    private int GetPositionHash(int x, int y, int z)
-    {
-        // Create a unique hash for a specific position within this chunk
-        // This ensures the same position always gets the same "random" value
-        int hash = 17;
-        hash = hash * 31 + worldSeed;
-        hash = hash * 31 + chunkCoord.x;
-        hash = hash * 31 + chunkCoord.y;
-        hash = hash * 31 + chunkCoord.z;
-        hash = hash * 31 + x;
-        hash = hash * 31 + y;
-        hash = hash * 31 + z;
-        return hash;
-    }
-    
-    private void CalculateVoxelLighting()
-    {
+        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
+        
         // Initialize light grid
-        for (int x = 0; x < chunkSize.x; x++)
+        for (int i = 0; i < totalVoxels; i++)
         {
-            for (int y = 0; y < chunkSize.y; y++)
-            {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    lightGrid[x, y, z] = 0f;
-                }
-            }
+            lightGridFlat[i] = 0f;
         }
         
         // Set initial light values for light sources
         foreach (var lightPos in lightPositions)
         {
-            lightGrid[lightPos.x, lightPos.y, lightPos.z] = lightSourceIntensity;
+            int lightIndex = CoordToIndex(lightPos.x, lightPos.y, lightPos.z);
+            lightGridFlat[lightIndex] = lightSourceIntensity;
             
             // Light radiates from source into adjacent empty space
             Vector3Int[] directions = {
@@ -212,194 +229,239 @@ public class DungeonChunk : MonoBehaviour
             foreach (var dir in directions)
             {
                 Vector3Int neighbor = lightPos + dir;
-                if (IsInGrid(neighbor) && !voxelGrid[neighbor.x, neighbor.y, neighbor.z])
+                if (IsInGrid(neighbor) && !GetVoxel(neighbor.x, neighbor.y, neighbor.z))
                 {
-                    lightGrid[neighbor.x, neighbor.y, neighbor.z] = 
-                        Mathf.Max(lightGrid[neighbor.x, neighbor.y, neighbor.z], 
+                    int neighborIndex = CoordToIndex(neighbor.x, neighbor.y, neighbor.z);
+                    lightGridFlat[neighborIndex] = Mathf.Max(lightGridFlat[neighborIndex], 
                         lightSourceIntensity - lightDecay * 0.5f);
                 }
             }
         }
         
-        // Propagate light through empty space
+        // Propagate light through empty space using optimized algorithm
+        float[] newLightGrid = new float[totalVoxels];
+        System.Array.Copy(lightGridFlat, newLightGrid, totalVoxels);
+        
         for (int step = 0; step < lightPropagationSteps; step++)
         {
-            float[,,] newLightGrid = (float[,,])lightGrid.Clone();
-            
-            for (int x = 0; x < chunkSize.x; x++)
+            // Parallel processing for performance
+            Parallel.For(0, totalVoxels, i =>
             {
-                for (int y = 0; y < chunkSize.y; y++)
+                if (voxelGridFlat[i]) return;
+                
+                Vector3Int coord = IndexToCoord(i);
+                float maxNeighborLight = 0f;
+                
+                // Check all 6 directions
+                if (coord.x > 0)
                 {
-                    for (int z = 0; z < chunkSize.z; z++)
-                    {
-                        if (voxelGrid[x, y, z]) continue;
-                        
-                        float maxNeighborLight = 0f;
-                        
-                        if (x > 0 && !voxelGrid[x-1, y, z])
-                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x-1, y, z]);
-                        
-                        if (x < chunkSize.x - 1 && !voxelGrid[x+1, y, z])
-                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x+1, y, z]);
-                        
-                        if (y > 0 && !voxelGrid[x, y-1, z])
-                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y-1, z]);
-                        
-                        if (y < chunkSize.y - 1 && !voxelGrid[x, y+1, z])
-                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y+1, z]);
-                        
-                        if (z > 0 && !voxelGrid[x, y, z-1])
-                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y, z-1]);
-                        
-                        if (z < chunkSize.z - 1 && !voxelGrid[x, y, z+1])
-                            maxNeighborLight = Mathf.Max(maxNeighborLight, lightGrid[x, y, z+1]);
-                        
-                        float propagatedLight = Mathf.Max(0, maxNeighborLight - lightDecay);
-                        newLightGrid[x, y, z] = Mathf.Max(newLightGrid[x, y, z], propagatedLight);
-                    }
+                    int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
+                    if (!voxelGridFlat[leftIndex])
+                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[leftIndex]);
                 }
-            }
+                
+                if (coord.x < chunkSize.x - 1)
+                {
+                    int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
+                    if (!voxelGridFlat[rightIndex])
+                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[rightIndex]);
+                }
+                
+                if (coord.y > 0)
+                {
+                    int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
+                    if (!voxelGridFlat[downIndex])
+                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[downIndex]);
+                }
+                
+                if (coord.y < chunkSize.y - 1)
+                {
+                    int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
+                    if (!voxelGridFlat[upIndex])
+                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[upIndex]);
+                }
+                
+                if (coord.z > 0)
+                {
+                    int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
+                    if (!voxelGridFlat[backIndex])
+                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[backIndex]);
+                }
+                
+                if (coord.z < chunkSize.z - 1)
+                {
+                    int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
+                    if (!voxelGridFlat[forwardIndex])
+                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[forwardIndex]);
+                }
+                
+                float propagatedLight = Mathf.Max(0, maxNeighborLight - lightDecay);
+                newLightGrid[i] = Mathf.Max(newLightGrid[i], propagatedLight);
+            });
             
-            lightGrid = newLightGrid;
+            // Swap grids
+            float[] temp = lightGridFlat;
+            lightGridFlat = newLightGrid;
+            newLightGrid = temp;
         }
         
         // Solid voxels receive light from adjacent empty voxels
-        for (int x = 0; x < chunkSize.x; x++)
+        Parallel.For(0, totalVoxels, i =>
         {
-            for (int y = 0; y < chunkSize.y; y++)
+            if (!voxelGridFlat[i]) return;
+            
+            Vector3Int coord = IndexToCoord(i);
+            
+            // Check if this is a light source
+            bool isLightSource = false;
+            foreach (var lightPos in lightPositions)
             {
-                for (int z = 0; z < chunkSize.z; z++)
+                if (lightPos.x == coord.x && lightPos.y == coord.y && lightPos.z == coord.z)
                 {
-                    if (!voxelGrid[x, y, z]) continue;
-                    
-                    // Check if this is a light source
-                    bool isLightSource = false;
-                    foreach (var lightPos in lightPositions)
-                    {
-                        if (lightPos.x == x && lightPos.y == y && lightPos.z == z)
-                        {
-                            isLightSource = true;
-                            break;
-                        }
-                    }
-                    
-                    if (isLightSource)
-                    {
-                        lightGrid[x, y, z] = lightSourceIntensity;
-                        continue;
-                    }
-                    
-                    float maxAdjacentLight = 0f;
-                    
-                    if (x > 0 && !voxelGrid[x-1, y, z])
-                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x-1, y, z]);
-                    
-                    if (x < chunkSize.x - 1 && !voxelGrid[x+1, y, z])
-                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x+1, y, z]);
-                    
-                    if (y > 0 && !voxelGrid[x, y-1, z])
-                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y-1, z]);
-                    
-                    if (y < chunkSize.y - 1 && !voxelGrid[x, y+1, z])
-                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y+1, z]);
-                    
-                    if (z > 0 && !voxelGrid[x, y, z-1])
-                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y, z-1]);
-                    
-                    if (z < chunkSize.z - 1 && !voxelGrid[x, y, z+1])
-                        maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGrid[x, y, z+1]);
-                    
-                    lightGrid[x, y, z] = Mathf.Max(lightGrid[x, y, z], maxAdjacentLight * 0.7f);
+                    isLightSource = true;
+                    break;
                 }
             }
-        }
+            
+            if (isLightSource)
+            {
+                lightGridFlat[i] = lightSourceIntensity;
+                return;
+            }
+            
+            float maxAdjacentLight = 0f;
+            
+            if (coord.x > 0)
+            {
+                int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
+                if (!voxelGridFlat[leftIndex])
+                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[leftIndex]);
+            }
+            
+            if (coord.x < chunkSize.x - 1)
+            {
+                int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
+                if (!voxelGridFlat[rightIndex])
+                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[rightIndex]);
+            }
+            
+            if (coord.y > 0)
+            {
+                int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
+                if (!voxelGridFlat[downIndex])
+                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[downIndex]);
+            }
+            
+            if (coord.y < chunkSize.y - 1)
+            {
+                int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
+                if (!voxelGridFlat[upIndex])
+                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[upIndex]);
+            }
+            
+            if (coord.z > 0)
+            {
+                int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
+                if (!voxelGridFlat[backIndex])
+                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[backIndex]);
+            }
+            
+            if (coord.z < chunkSize.z - 1)
+            {
+                int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
+                if (!voxelGridFlat[forwardIndex])
+                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[forwardIndex]);
+            }
+            
+            lightGridFlat[i] = Mathf.Max(lightGridFlat[i], maxAdjacentLight * 0.7f);
+        });
         
         // Smooth lighting if enabled
         if (smoothLighting)
         {
-            SmoothLighting();
+            SmoothLightingOptimized();
         }
+        
+        // Convert back to 3D array
+        ConvertFromFlatArray();
     }
     
-    private void SmoothLighting()
+    private void SmoothLightingOptimized()
     {
-        float[,,] smoothed = new float[chunkSize.x, chunkSize.y, chunkSize.z];
+        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
+        float[] smoothed = new float[totalVoxels];
         
-        for (int x = 0; x < chunkSize.x; x++)
+        Parallel.For(0, totalVoxels, i =>
         {
-            for (int y = 0; y < chunkSize.y; y++)
+            Vector3Int coord = IndexToCoord(i);
+            float sum = 0;
+            int count = 0;
+            
+            // 3x3x3 kernel
+            for (int dx = -1; dx <= 1; dx++)
             {
-                for (int z = 0; z < chunkSize.z; z++)
+                for (int dy = -1; dy <= 1; dy++)
                 {
-                    float sum = 0;
-                    int count = 0;
-                    
-                    for (int dx = -1; dx <= 1; dx++)
+                    for (int dz = -1; dz <= 1; dz++)
                     {
-                        for (int dy = -1; dy <= 1; dy++)
+                        int nx = coord.x + dx;
+                        int ny = coord.y + dy;
+                        int nz = coord.z + dz;
+                        
+                        if (nx >= 0 && nx < chunkSize.x &&
+                            ny >= 0 && ny < chunkSize.y &&
+                            nz >= 0 && nz < chunkSize.z)
                         {
-                            for (int dz = -1; dz <= 1; dz++)
+                            int neighborIndex = CoordToIndex(nx, ny, nz);
+                            if (voxelGridFlat[neighborIndex] == voxelGridFlat[i])
                             {
-                                int nx = x + dx;
-                                int ny = y + dy;
-                                int nz = z + dz;
-                                
-                                if (nx >= 0 && nx < chunkSize.x &&
-                                    ny >= 0 && ny < chunkSize.y &&
-                                    nz >= 0 && nz < chunkSize.z)
-                                {
-                                    if (voxelGrid[nx, ny, nz] == voxelGrid[x, y, z])
-                                    {
-                                        sum += lightGrid[nx, ny, nz];
-                                        count++;
-                                    }
-                                }
+                                sum += lightGridFlat[neighborIndex];
+                                count++;
                             }
                         }
                     }
-                    
-                    if (count > 0)
-                        smoothed[x, y, z] = sum / count;
-                    else
-                        smoothed[x, y, z] = lightGrid[x, y, z];
                 }
             }
-        }
+            
+            if (count > 0)
+                smoothed[i] = sum / count;
+            else
+                smoothed[i] = lightGridFlat[i];
+        });
         
-        for (int x = 0; x < chunkSize.x; x++)
+        // Blend smoothed with original
+        for (int i = 0; i < totalVoxels; i++)
         {
-            for (int y = 0; y < chunkSize.y; y++)
-            {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    lightGrid[x, y, z] = smoothed[x, y, z] * 0.7f + lightGrid[x, y, z] * 0.3f;
-                }
-            }
+            lightGridFlat[i] = smoothed[i] * 0.7f + lightGridFlat[i] * 0.3f;
         }
     }
     
-    private MeshData GenerateLitMesh()
+    private void GenerateLitMeshOptimized()
     {
         MeshData meshData = new MeshData();
+        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
         
-        for (int x = 0; x < chunkSize.x; x++)
+        // Pre-allocate lists with estimated capacity
+        int estimatedFaces = totalVoxels / 2; // Rough estimate
+        meshData.vertices.Capacity = estimatedFaces * 4;
+        meshData.triangles.Capacity = estimatedFaces * 6;
+        meshData.uv.Capacity = estimatedFaces * 4;
+        meshData.colors.Capacity = estimatedFaces * 4;
+        meshData.normals.Capacity = estimatedFaces * 4;
+        
+        for (int i = 0; i < totalVoxels; i++)
         {
-            for (int y = 0; y < chunkSize.y; y++)
+            if (voxelGridFlat[i])
             {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    if (voxelGrid[x, y, z])
-                    {
-                        AddFacesWithCrossChunkCulling(x, y, z, meshData);
-                    }
-                }
+                Vector3Int coord = IndexToCoord(i);
+                AddFacesWithCrossChunkCullingOptimized(coord.x, coord.y, coord.z, meshData);
             }
         }
         
-        return meshData;
+        ApplyMesh(meshData);
     }
     
-    private void AddFacesWithCrossChunkCulling(int x, int y, int z, MeshData meshData)
+    private void AddFacesWithCrossChunkCullingOptimized(int x, int y, int z, MeshData meshData)
     {
         Vector3 offset = new Vector3(x, y, z);
         
@@ -415,74 +477,74 @@ public class DungeonChunk : MonoBehaviour
         }
         
         // LEFT FACE (Negative X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.left))
+        if (ShouldGenerateFaceOptimized(x, y, z, Vector3Int.left))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.left);
-            AddFace(offset, 
+            float faceLight = GetFaceLightLevelOptimized(x, y, z, Vector3Int.left);
+            AddFaceOptimized(offset, 
                 new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
                 meshData, materialID, false, faceLight);
         }
         
         // RIGHT FACE (Positive X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.right))
+        if (ShouldGenerateFaceOptimized(x, y, z, Vector3Int.right))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.right);
-            AddFace(offset, 
+            float faceLight = GetFaceLightLevelOptimized(x, y, z, Vector3Int.right);
+            AddFaceOptimized(offset, 
                 new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
                 meshData, materialID, false, faceLight);
         }
         
         // BOTTOM FACE (Negative Y) - FLOOR
-        if (ShouldGenerateFace(x, y, z, Vector3Int.down))
+        if (ShouldGenerateFaceOptimized(x, y, z, Vector3Int.down))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_FLOOR;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.down);
-            AddFace(offset, 
+            float faceLight = GetFaceLightLevelOptimized(x, y, z, Vector3Int.down);
+            AddFaceOptimized(offset, 
                 new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
                 meshData, materialID, true, faceLight);
         }
         
         // TOP FACE (Positive Y) - CEILING
-        if (ShouldGenerateFace(x, y, z, Vector3Int.up))
+        if (ShouldGenerateFaceOptimized(x, y, z, Vector3Int.up))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_CEILING;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.up);
-            AddFace(offset, 
+            float faceLight = GetFaceLightLevelOptimized(x, y, z, Vector3Int.up);
+            AddFaceOptimized(offset, 
                 new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
                 meshData, materialID, true, faceLight);
         }
         
         // FRONT FACE (Negative Z)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.back))
+        if (ShouldGenerateFaceOptimized(x, y, z, Vector3Int.back))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.back);
-            AddFace(offset, 
+            float faceLight = GetFaceLightLevelOptimized(x, y, z, Vector3Int.back);
+            AddFaceOptimized(offset, 
                 new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
                 meshData, materialID, false, faceLight);
         }
         
         // BACK FACE (Positive Z)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.forward))
+        if (ShouldGenerateFaceOptimized(x, y, z, Vector3Int.forward))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.forward);
-            AddFace(offset, 
+            float faceLight = GetFaceLightLevelOptimized(x, y, z, Vector3Int.forward);
+            AddFaceOptimized(offset, 
                 new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
                 meshData, materialID, false, faceLight);
         }
     }
     
-    private bool ShouldGenerateFace(int x, int y, int z, Vector3Int direction)
+    private bool ShouldGenerateFaceOptimized(int x, int y, int z, Vector3Int direction)
     {
         // Check adjacent voxel in this chunk
         Vector3Int adjPos = new Vector3Int(x, y, z) + direction;
         
         if (IsInGrid(adjPos))
         {
-            return !voxelGrid[adjPos.x, adjPos.y, adjPos.z];
+            return !GetVoxel(adjPos.x, adjPos.y, adjPos.z);
         }
         else
         {
@@ -550,14 +612,14 @@ public class DungeonChunk : MonoBehaviour
         return false;
     }
     
-    private float GetFaceLightLevel(int x, int y, int z, Vector3Int faceNormal)
+    private float GetFaceLightLevelOptimized(int x, int y, int z, Vector3Int faceNormal)
     {
         // Get light from the empty space adjacent to this face
         Vector3Int adjPos = new Vector3Int(x, y, z) + faceNormal;
         
         if (IsInGrid(adjPos))
         {
-            if (!voxelGrid[adjPos.x, adjPos.y, adjPos.z])
+            if (!GetVoxel(adjPos.x, adjPos.y, adjPos.z))
             {
                 return lightGrid[adjPos.x, adjPos.y, adjPos.z];
             }
@@ -567,15 +629,8 @@ public class DungeonChunk : MonoBehaviour
         return lightGrid[x, y, z];
     }
     
-    private bool IsInGrid(Vector3Int pos)
-    {
-        return pos.x >= 0 && pos.x < chunkSize.x &&
-               pos.y >= 0 && pos.y < chunkSize.y &&
-               pos.z >= 0 && pos.z < chunkSize.z;
-    }
-    
-    private void AddFace(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3,
-                        MeshData meshData, byte materialID, bool isHorizontal, float faceLight)
+    private void AddFaceOptimized(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3,
+                                 MeshData meshData, byte materialID, bool isHorizontal, float faceLight)
     {
         int baseIndex = meshData.vertices.Count;
         
@@ -681,6 +736,55 @@ public class DungeonChunk : MonoBehaviour
         }
     }
     
+    // Helper methods
+    private bool IsInGrid(Vector3Int pos)
+    {
+        return pos.x >= 0 && pos.x < chunkSize.x &&
+               pos.y >= 0 && pos.y < chunkSize.y &&
+               pos.z >= 0 && pos.z < chunkSize.z;
+    }
+    
+    private bool GetVoxel(int x, int y, int z)
+    {
+        if (x < 0 || x >= chunkSize.x || y < 0 || y >= chunkSize.y || z < 0 || z >= chunkSize.z)
+            return false;
+        
+        return voxelGridFlat[CoordToIndex(x, y, z)];
+    }
+    
+    private int CoordToIndex(int x, int y, int z)
+    {
+        return x * chunkSize.y * chunkSize.z + y * chunkSize.z + z;
+    }
+    
+    private Vector3Int IndexToCoord(int index)
+    {
+        int z = index % chunkSize.z;
+        int y = (index / chunkSize.z) % chunkSize.y;
+        int x = index / (chunkSize.y * chunkSize.z);
+        return new Vector3Int(x, y, z);
+    }
+    
+    private int GetChunkSeed()
+    {
+        // Combine world seed with chunk coordinates for a unique but deterministic seed
+        return worldSeed ^ (chunkCoord.x * 73856093) ^ (chunkCoord.y * 19349663) ^ (chunkCoord.z * 83492791);
+    }
+    
+    private int GetPositionHash(int x, int y, int z)
+    {
+        // Create a unique hash for a specific position within this chunk
+        int hash = 17;
+        hash = hash * 31 + worldSeed;
+        hash = hash * 31 + chunkCoord.x;
+        hash = hash * 31 + chunkCoord.y;
+        hash = hash * 31 + chunkCoord.z;
+        hash = hash * 31 + x;
+        hash = hash * 31 + y;
+        hash = hash * 31 + z;
+        return hash;
+    }
+    
     public void Clear()
     {
         if (meshFilter != null && meshFilter.mesh != null)
@@ -691,6 +795,16 @@ public class DungeonChunk : MonoBehaviour
         voxelGrid = null;
         lightGrid = null;
         lightPositions.Clear();
+        voxelGridFlat = null;
+        lightGridFlat = null;
+    }
+    
+    public void UpdateBoundaryMeshes()
+    {
+        if (voxelGrid != null)
+        {
+            GenerateMesh(voxelGrid);
+        }
     }
     
     private class MeshData

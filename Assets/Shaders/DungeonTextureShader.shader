@@ -13,6 +13,10 @@ Shader "Custom/DungeonTextureShader"
         
         // Texture Tiling
         _TextureScale ("Texture Scale", Vector) = (1, 1, 0, 0)
+        
+        // Smooth lighting parameters
+        _LightSmoothness ("Light Smoothness", Range(0, 1)) = 0.5
+        _LightContrast ("Light Contrast", Range(0.5, 2)) = 1.0
     }
     
     SubShader
@@ -26,6 +30,7 @@ Shader "Custom/DungeonTextureShader"
             #pragma vertex vert
             #pragma fragment frag
             #pragma multi_compile_fog
+            #pragma multi_compile _ SMOOTH_LIGHTING_ON
             
             #include "UnityCG.cginc"
 
@@ -33,7 +38,7 @@ Shader "Custom/DungeonTextureShader"
             {
                 float4 vertex : POSITION;
                 float2 uv : TEXCOORD0;
-                float4 color : COLOR; // Material ID in R, Light level in G
+                float4 color : COLOR;
             };
 
             struct v2f
@@ -44,15 +49,16 @@ Shader "Custom/DungeonTextureShader"
                 float4 vertex : SV_POSITION;
             };
 
-            // Textures
             sampler2D _WallTex;
             sampler2D _FloorTex;
             sampler2D _CeilingTex;
             
-            // Lighting properties
             float _Ambient;
             float _MaxLight;
             float2 _TextureScale;
+            
+            float _LightSmoothness;
+            float _LightContrast;
 
             v2f vert (appdata v)
             {
@@ -66,51 +72,51 @@ Shader "Custom/DungeonTextureShader"
 
             fixed4 frag (v2f i) : SV_Target
             {
-                // Decode vertex color data
-                // Material ID is encoded as: 0=Wall, 1=Floor, 2=Ceiling, 3=Light
-                float materialIDFloat = i.color.r * 3.0; // Multiply by 3 to get actual ID
+                float materialIDFloat = i.color.r * 3.0;
                 int materialID = (int)round(materialIDFloat);
-                float voxelLight = i.color.g; // Pre-calculated light level for this voxel
+                float voxelLight = i.color.g;
                 
-                // Select base texture
                 fixed4 texColor;
-                if (materialID == 1) // Floor
+                if (materialID == 1)
                 {
                     texColor = tex2D(_FloorTex, i.uv * _TextureScale);
                 }
-                else if (materialID == 2) // Ceiling
+                else if (materialID == 2)
                 {
                     texColor = tex2D(_CeilingTex, i.uv * _TextureScale);
                 }
-                else if (materialID == 3) // Light source
+                else if (materialID == 3)
                 {
-                    texColor = fixed4(1, 1, 0.9, 1); // Warm white for light sources
+                    texColor = fixed4(1, 1, 0.9, 1);
                 }
-                else // Wall (default or materialID == 0)
+                else
                 {
                     texColor = tex2D(_WallTex, i.uv * _TextureScale);
                 }
                 
-                // Minecraft-style lighting: ambient + voxel light
-                float totalLight = _Ambient + voxelLight * _MaxLight;
+                #ifdef SMOOTH_LIGHTING_ON
+                    float smoothLight = smoothstep(0, 1, voxelLight);
+                    smoothLight = lerp(voxelLight, smoothLight, _LightSmoothness);
+                    smoothLight = pow(smoothLight, _LightContrast);
+                    
+                    float totalLight = _Ambient + smoothLight * _MaxLight;
+                #else
+                    float totalLight = _Ambient + voxelLight * _MaxLight;
+                #endif
+                
                 totalLight = saturate(totalLight);
                 
-                // Apply lighting
                 fixed4 finalColor = texColor;
                 finalColor.rgb *= totalLight;
                 
-                // Light sources glow
                 if (materialID == 3)
                 {
-                    // Bright glow for light sources
                     finalColor.rgb = texColor.rgb * 2.0;
                     
-                    // Subtle flicker
                     float flicker = sin(_Time.y * 3.0 + i.uv.x * 5.0) * 0.05 + 0.95;
                     finalColor.rgb *= flicker;
                 }
                 
-                // Fog
                 UNITY_APPLY_FOG(i.fogCoord, finalColor);
                 
                 return finalColor;

@@ -1,5 +1,9 @@
 using UnityEngine;
 using System.Collections.Generic;
+using Unity.Jobs;
+using Unity.Collections;
+using Unity.Mathematics;
+using Unity.Burst;
 
 public class InfiniteChunkManager : MonoBehaviour
 {
@@ -25,29 +29,34 @@ public class InfiniteChunkManager : MonoBehaviour
     private CrossChunkRoomGenerator roomGenerator;
     
     // Chunk storage
-    private Dictionary<Vector3Int, DungeonChunk> loadedChunks = new Dictionary<Vector3Int, DungeonChunk>();
-    private Dictionary<Vector3Int, bool[,,]> chunkVoxelCache = new Dictionary<Vector3Int, bool[,,]>();
+    private Dictionary<int, DungeonChunk> loadedChunks = new Dictionary<int, DungeonChunk>();
+    private Dictionary<int, bool[,,]> chunkVoxelCache = new Dictionary<int, bool[,,]>();
     private Queue<DungeonChunk> chunkPool = new Queue<DungeonChunk>();
     private Transform chunkContainer;
     
     // Generation queues with priorities
-    private BinaryHeap<ChunkGenerationJob> generationQueue = new BinaryHeap<ChunkGenerationJob>();
-    private HashSet<Vector3Int> currentlyGenerating = new HashSet<Vector3Int>();
+    private PriorityQueue<ChunkGenerationTask> generationQueue = new PriorityQueue<ChunkGenerationTask>();
+    private HashSet<int> currentlyGenerating = new HashSet<int>();
     
     // State
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
     private Vector3Int lastPlayerChunkCoord = Vector3Int.zero;
     
     // Track chunks that need boundary updates
-    private HashSet<Vector3Int> chunksNeedingBoundaryUpdate = new HashSet<Vector3Int>();
+    private HashSet<int> chunksNeedingBoundaryUpdate = new HashSet<int>();
     
-    private class ChunkGenerationJob : System.IComparable<ChunkGenerationJob>
+    // Coordinate hashing (faster than Vector3Int for dictionary keys)
+    private const int HASH_PRIME_X = 73856093;
+    private const int HASH_PRIME_Y = 19349663;
+    private const int HASH_PRIME_Z = 83492791;
+    
+    private class ChunkGenerationTask : System.IComparable<ChunkGenerationTask>
     {
         public Vector3Int chunkCoord;
         public int priority; // Lower number = higher priority
         public float timestamp;
         
-        public int CompareTo(ChunkGenerationJob other)
+        public int CompareTo(ChunkGenerationTask other)
         {
             // Primary sort by priority, secondary by timestamp (FIFO for same priority)
             int priorityCompare = priority.CompareTo(other.priority);
@@ -57,7 +66,7 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
     
-    private class BinaryHeap<T> where T : System.IComparable<T>
+    private class PriorityQueue<T> where T : System.IComparable<T>
     {
         private List<T> heap = new List<T>();
         
@@ -123,7 +132,7 @@ public class InfiniteChunkManager : MonoBehaviour
         {
             foreach (var item in heap)
             {
-                if (item is ChunkGenerationJob job && job.chunkCoord == coord)
+                if (item is ChunkGenerationTask task && task.chunkCoord == coord)
                     return true;
             }
             return false;
@@ -133,7 +142,7 @@ public class InfiniteChunkManager : MonoBehaviour
         {
             for (int i = 0; i < heap.Count; i++)
             {
-                if (heap[i] is ChunkGenerationJob job && job.chunkCoord == coord)
+                if (heap[i] is ChunkGenerationTask task && task.chunkCoord == coord)
                 {
                     heap[i] = heap[heap.Count - 1];
                     heap.RemoveAt(heap.Count - 1);
@@ -158,7 +167,7 @@ public class InfiniteChunkManager : MonoBehaviour
         // Initialize seed
         if (randomizeSeed)
         {
-            worldSeed = Random.Range(int.MinValue, int.MaxValue);
+            worldSeed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
         }
         Debug.Log($"World seed: {worldSeed}");
         
@@ -226,15 +235,16 @@ public class InfiniteChunkManager : MonoBehaviour
                 for (int z = -renderDistance; z <= renderDistance; z++)
                 {
                     Vector3Int chunkCoord = currentPlayerChunkCoord + new Vector3Int(x, y, z);
+                    int chunkHash = HashCoordinate(chunkCoord);
                     
-                    if (loadedChunks.ContainsKey(chunkCoord) || 
-                        currentlyGenerating.Contains(chunkCoord))
+                    if (loadedChunks.ContainsKey(chunkHash) || 
+                        currentlyGenerating.Contains(chunkHash))
                         continue;
                     
                     int distance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
                     int priority = CalculatePriority(distance, chunkCoord);
                     
-                    generationQueue.Enqueue(new ChunkGenerationJob
+                    generationQueue.Enqueue(new ChunkGenerationTask
                     {
                         chunkCoord = chunkCoord,
                         priority = priority,
@@ -244,19 +254,22 @@ public class InfiniteChunkManager : MonoBehaviour
             }
         }
         
-        List<Vector3Int> chunksToUnload = new List<Vector3Int>();
+        List<int> chunksToUnload = new List<int>();
         foreach (var kvp in loadedChunks)
         {
-            int distance = GetChunkDistance(kvp.Key, currentPlayerChunkCoord);
+            Vector3Int chunkWorldPos = Vector3Int.FloorToInt(kvp.Value.GetChunkWorldPosition());
+            Vector3Int chunkCoord = WorldToChunkCoord(chunkWorldPos);
+            int distance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
+            
             if (distance > renderDistance)
             {
                 chunksToUnload.Add(kvp.Key);
             }
         }
         
-        foreach (var coord in chunksToUnload)
+        foreach (var chunkHash in chunksToUnload)
         {
-            UnloadChunk(coord);
+            UnloadChunk(chunkHash);
         }
     }
     
@@ -274,28 +287,30 @@ public class InfiniteChunkManager : MonoBehaviour
         
         while (chunksProcessed < maxChunksPerFrame && generationQueue.Count > 0)
         {
-            if (generationQueue.TryDequeue(out ChunkGenerationJob job))
+            if (generationQueue.TryDequeue(out ChunkGenerationTask task))
             {
-                int currentDistance = GetChunkDistance(job.chunkCoord, currentPlayerChunkCoord);
+                int chunkHash = HashCoordinate(task.chunkCoord);
+                int currentDistance = GetChunkDistance(task.chunkCoord, currentPlayerChunkCoord);
                 
                 if (cancelDistantGeneration && currentDistance > renderDistance + 1)
                 {
-                    currentlyGenerating.Remove(job.chunkCoord);
+                    currentlyGenerating.Remove(chunkHash);
                     continue;
                 }
                 
-                currentlyGenerating.Add(job.chunkCoord);
+                currentlyGenerating.Add(chunkHash);
                 
                 if (asyncGeneration)
                 {
-                    GenerateChunkImmediate(job.chunkCoord);
+                    // Start async generation (simplified for now)
+                    GenerateChunkImmediate(task.chunkCoord);
                 }
                 else
                 {
-                    GenerateChunkImmediate(job.chunkCoord);
+                    GenerateChunkImmediate(task.chunkCoord);
                 }
                 
-                currentlyGenerating.Remove(job.chunkCoord);
+                currentlyGenerating.Remove(chunkHash);
                 chunksProcessed++;
             }
         }
@@ -306,28 +321,33 @@ public class InfiniteChunkManager : MonoBehaviour
         if (chunksNeedingBoundaryUpdate.Count == 0) return;
         
         int maxUpdates = Mathf.Min(3, chunksNeedingBoundaryUpdate.Count);
-        List<Vector3Int> toProcess = new List<Vector3Int>();
+        List<int> toProcess = new List<int>();
         
-        foreach (var coord in chunksNeedingBoundaryUpdate)
+        foreach (var chunkHash in chunksNeedingBoundaryUpdate)
         {
-            toProcess.Add(coord);
+            toProcess.Add(chunkHash);
             if (toProcess.Count >= maxUpdates) break;
         }
         
-        foreach (var coord in toProcess)
+        foreach (var chunkHash in toProcess)
         {
-            chunksNeedingBoundaryUpdate.Remove(coord);
-            UpdateChunkBoundaryMeshes(coord);
+            chunksNeedingBoundaryUpdate.Remove(chunkHash);
+            if (loadedChunks.TryGetValue(chunkHash, out DungeonChunk chunk))
+            {
+                chunk.UpdateBoundaryMeshes();
+            }
         }
     }
     
     private void GenerateChunkImmediate(Vector3Int chunkCoord)
     {
+        int chunkHash = HashCoordinate(chunkCoord);
         int currentDistance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
+        
         if (cancelDistantGeneration && currentDistance > renderDistance)
             return;
         
-        if (loadedChunks.ContainsKey(chunkCoord)) return;
+        if (loadedChunks.ContainsKey(chunkHash)) return;
         
         DungeonChunk chunk = GetChunkFromPool();
         if (chunk == null)
@@ -351,11 +371,11 @@ public class InfiniteChunkManager : MonoBehaviour
                 renderer.material = new Material(chunkMaterial);
             }
             
-            if (!chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+            if (!chunkVoxelCache.TryGetValue(chunkHash, out bool[,,] voxelGrid))
             {
                 voxelGrid = new bool[chunkSize.x, chunkSize.y, chunkSize.z];
                 roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelGrid);
-                chunkVoxelCache[chunkCoord] = voxelGrid;
+                chunkVoxelCache[chunkHash] = voxelGrid;
                 
                 MarkAdjacentChunksForUpdate(chunkCoord);
             }
@@ -363,7 +383,7 @@ public class InfiniteChunkManager : MonoBehaviour
             chunk.Initialize(chunkSize);
             chunk.GenerateMesh(voxelGrid);
             
-            loadedChunks[chunkCoord] = chunk;
+            loadedChunks[chunkHash] = chunk;
         }
         catch (System.Exception e)
         {
@@ -383,22 +403,26 @@ public class InfiniteChunkManager : MonoBehaviour
         foreach (var dir in directions)
         {
             Vector3Int adjacentCoord = newChunkCoord + dir;
-            if (loadedChunks.ContainsKey(adjacentCoord))
+            int adjacentHash = HashCoordinate(adjacentCoord);
+            
+            if (loadedChunks.ContainsKey(adjacentHash) && !chunksNeedingBoundaryUpdate.Contains(adjacentHash))
             {
-                chunksNeedingBoundaryUpdate.Add(adjacentCoord);
+                chunksNeedingBoundaryUpdate.Add(adjacentHash);
             }
         }
     }
     
     public bool TryGetVoxelData(Vector3Int chunkCoord, Vector3Int localPos, out bool isSolid)
     {
-        if (currentlyGenerating.Contains(chunkCoord))
+        int chunkHash = HashCoordinate(chunkCoord);
+        
+        if (currentlyGenerating.Contains(chunkHash))
         {
             isSolid = true;
             return false;
         }
         
-        if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
+        if (chunkVoxelCache.TryGetValue(chunkHash, out bool[,,] voxelGrid))
         {
             if (localPos.x >= 0 && localPos.x < chunkSize.x &&
                 localPos.y >= 0 && localPos.y < chunkSize.y &&
@@ -411,17 +435,6 @@ public class InfiniteChunkManager : MonoBehaviour
         
         isSolid = false;
         return false;
-    }
-    
-    public void UpdateChunkBoundaryMeshes(Vector3Int chunkCoord)
-    {
-        if (loadedChunks.TryGetValue(chunkCoord, out DungeonChunk chunk))
-        {
-            if (chunkVoxelCache.TryGetValue(chunkCoord, out bool[,,] voxelGrid))
-            {
-                chunk.GenerateMesh(voxelGrid);
-            }
-        }
     }
     
     public Vector3Int WorldToChunkCoord(Vector3 worldPos)
@@ -451,17 +464,17 @@ public class InfiniteChunkManager : MonoBehaviour
         );
     }
     
-    private void UnloadChunk(Vector3Int chunkCoord)
+    private void UnloadChunk(int chunkHash)
     {
-        if (loadedChunks.TryGetValue(chunkCoord, out DungeonChunk chunk))
+        if (loadedChunks.TryGetValue(chunkHash, out DungeonChunk chunk))
         {
             ReturnChunkToPool(chunk);
-            loadedChunks.Remove(chunkCoord);
+            loadedChunks.Remove(chunkHash);
             
-            roomGenerator.ClearChunkData(chunkCoord);
-            chunkVoxelCache.Remove(chunkCoord);
+            roomGenerator.ClearChunkData(chunk.GetChunkCoord());
+            chunkVoxelCache.Remove(chunkHash);
             
-            UpdateAdjacentChunks(chunkCoord);
+            UpdateAdjacentChunks(chunk.GetChunkCoord());
         }
     }
     
@@ -476,8 +489,18 @@ public class InfiniteChunkManager : MonoBehaviour
         foreach (var dir in directions)
         {
             Vector3Int adjacentCoord = unloadedChunkCoord + dir;
-            chunksNeedingBoundaryUpdate.Add(adjacentCoord);
+            int adjacentHash = HashCoordinate(adjacentCoord);
+            
+            if (loadedChunks.ContainsKey(adjacentHash) && !chunksNeedingBoundaryUpdate.Contains(adjacentHash))
+            {
+                chunksNeedingBoundaryUpdate.Add(adjacentHash);
+            }
         }
+    }
+    
+    private int HashCoordinate(Vector3Int coord)
+    {
+        return coord.x * HASH_PRIME_X ^ coord.y * HASH_PRIME_Y ^ coord.z * HASH_PRIME_Z;
     }
     
     private void InitializeObjectPool()
