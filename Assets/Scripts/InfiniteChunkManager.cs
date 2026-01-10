@@ -365,11 +365,11 @@ public class InfiniteChunkManager : MonoBehaviour
             
             chunk.SetChunkCoord(chunkCoord, worldSeed);
             
-            MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
+            /*MeshRenderer renderer = chunk.GetComponent<MeshRenderer>();
             if (renderer != null && chunkMaterial != null)
             {
                 renderer.material = new Material(chunkMaterial);
-            }
+            }*/ // Don't need this, as I have already set the material in the prefab inspector
             
             if (!chunkVoxelCache.TryGetValue(chunkHash, out bool[,,] voxelGrid))
             {
