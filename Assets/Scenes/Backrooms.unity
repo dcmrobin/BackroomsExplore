@@ -353,11 +353,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 22251ba5f91e0d940a944f7640209e11, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  noiseScale: {x: 0.06, y: 0.06, z: 0.06}
+  noiseScale: {x: 0.08, y: 0.08, z: 0.08}
   noiseOffset: {x: 0, y: 0, z: 0}
   useNoiseCache: 1
-  roomThreshold: 0.8
-  roomExpansionThreshold: 0.55
+  roomThreshold: 0.6
+  roomExpansionThreshold: 0.7
   minRoomSize: 7
   maxRoomSize: 30
   roomScanStep: 4
