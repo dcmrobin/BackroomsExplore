@@ -281,10 +281,10 @@ public class GeometricRoomGenerator : MonoBehaviour
         if (meshRenderer == null) meshRenderer = gameObject.AddComponent<MeshRenderer>();
         if (meshCollider == null) meshCollider = gameObject.AddComponent<MeshCollider>();
         
-        if (dungeonMaterial != null)
-        {
-            meshRenderer.material = new Material(dungeonMaterial);
-        }
+        //if (dungeonMaterial != null)
+        //{
+        //    meshRenderer.material = new Material(dungeonMaterial);
+        //}
     }
 
     private void SetupMaterial()

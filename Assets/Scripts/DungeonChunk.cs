@@ -2,17 +2,21 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Unity.Collections;
+using System.Collections.Concurrent;
 
 public class DungeonChunk : MonoBehaviour
 {
     [Header("Lighting Settings")]
+    [SerializeField] private bool enableLighting = true;
     [SerializeField] private float lightPlacementChance = 0.2f;
-    [SerializeField] private int minLightsPerRoom = 1;
-    [SerializeField] private int maxLightsPerRoom = 3;
-    [SerializeField] private float lightDecay = 0.15f;
-    [SerializeField] private int lightPropagationSteps = 15;
-    [SerializeField] private float lightSourceIntensity = 1.0f;
-    [SerializeField] private bool smoothLighting = true; // Now actually toggles between vertex and face lighting
+    [SerializeField] private int maxLightsPerChunk = 8;
+    [SerializeField] private int maxLightLevel = 15;
+    [SerializeField] private int minLightLevel = 0;
+    
+    [Header("Performance")]
+    [SerializeField] private bool useMeshCache = true;
+    [SerializeField] private bool skipEmptyChunks = true;
+    [SerializeField] private bool smoothLighting = false; // Keep false for performance
     
     [Header("Textures")]
     [SerializeField] private Texture2D wallTexture;
@@ -25,7 +29,7 @@ public class DungeonChunk : MonoBehaviour
     private MeshCollider meshCollider;
     
     private NativeArray<byte> voxelData;
-    private float[,,] lightGrid;
+    private byte[,,] lightMap;
     private Vector3Int chunkSize;
     private List<Vector3Int> lightPositions = new List<Vector3Int>();
     
@@ -41,11 +45,12 @@ public class DungeonChunk : MonoBehaviour
     private const byte MATERIAL_LIGHT = 3;
     
     // Optimized arrays for faster access
-    private byte[] voxelDataArray; // Temp managed array for easier access
-    private float[] lightGridFlat;
+    private byte[] voxelDataArray;
+    private Queue<Vector3Int> lightBfsQueue = new Queue<Vector3Int>();
     
-    // Vertex lighting data - stores light value for each vertex position
-    private Dictionary<Vector3Int, float> vertexLightCache = new Dictionary<Vector3Int, float>();
+    // Cache
+    private static ConcurrentDictionary<int, Mesh> meshCache = new ConcurrentDictionary<int, Mesh>();
+    private int lastVoxelHash = 0;
     
     public void Initialize(Vector3Int size)
     {
@@ -58,10 +63,6 @@ public class DungeonChunk : MonoBehaviour
         if (meshFilter == null) meshFilter = gameObject.AddComponent<MeshFilter>();
         if (meshRenderer == null) meshRenderer = gameObject.AddComponent<MeshRenderer>();
         if (meshCollider == null) meshCollider = gameObject.AddComponent<MeshCollider>();
-        
-        // Initialize flat array for lighting
-        int voxelCount = size.x * size.y * size.z;
-        lightGridFlat = new float[voxelCount];
     }
     
     public void SetChunkCoord(Vector3Int coord, int seed)
@@ -78,25 +79,97 @@ public class DungeonChunk : MonoBehaviour
     {
         this.voxelData = voxelData;
         
-        // Convert to managed array for performance (optional, but easier to work with)
+        // Convert to managed array
         int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
         voxelDataArray = new byte[voxelCount];
         voxelData.CopyTo(voxelDataArray);
         
-        // Place lights
-        PlaceLights();
-        
-        // Calculate lighting (optimized)
-        CalculateVoxelLightingOptimized();
-        
-        // Generate mesh with lighting data
-        if (smoothLighting)
+        // Skip empty chunks
+        if (skipEmptyChunks && IsChunkEmpty())
         {
-            GenerateSmoothLitMesh();
+            ClearMesh();
+            return;
         }
-        else
+        
+        // Check cache first
+        int voxelHash = useMeshCache ? CalculateVoxelHash() : 0;
+        
+        if (useMeshCache && voxelHash == lastVoxelHash && meshFilter.mesh != null)
         {
-            GenerateFlatLitMesh();
+            return; // Already have correct mesh
+        }
+        
+        if (useMeshCache && meshCache.TryGetValue(voxelHash, out Mesh cachedMesh))
+        {
+            meshFilter.mesh = cachedMesh;
+            if (meshCollider != null) meshCollider.sharedMesh = cachedMesh;
+            lastVoxelHash = voxelHash;
+            return;
+        }
+        
+        try
+        {
+            if (enableLighting)
+            {
+                PlaceLights();
+                CalculateLightingBFS();
+            }
+            
+            Mesh mesh = new Mesh();
+            
+            if (smoothLighting)
+            {
+                GenerateSmoothLitMesh(mesh);
+            }
+            else
+            {
+                GenerateFlatLitMesh(mesh);
+            }
+            
+            // Cache the mesh
+            if (useMeshCache)
+            {
+                meshCache[voxelHash] = mesh;
+                lastVoxelHash = voxelHash;
+            }
+            
+            meshFilter.mesh = mesh;
+            if (meshCollider != null) meshCollider.sharedMesh = mesh;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Error generating mesh for chunk {chunkCoord}: {e.Message}");
+        }
+    }
+    
+    private bool IsChunkEmpty()
+    {
+        for (int i = 0; i < voxelDataArray.Length; i++)
+        {
+            if (voxelDataArray[i] != 0)
+                return false;
+        }
+        return true;
+    }
+    
+    private int CalculateVoxelHash()
+    {
+        // Simple but fast hash for caching
+        unchecked
+        {
+            int hash = 17;
+            int step = Mathf.Max(1, voxelDataArray.Length / 100);
+            
+            for (int i = 0; i < voxelDataArray.Length; i += step)
+            {
+                hash = hash * 31 + voxelDataArray[i];
+            }
+            
+            // Include lighting state in hash
+            hash = hash * 31 + (enableLighting ? 1 : 0);
+            hash = hash * 31 + (smoothLighting ? 1 : 0);
+            
+            return hash;
         }
     }
     
@@ -104,555 +177,267 @@ public class DungeonChunk : MonoBehaviour
     {
         lightPositions.Clear();
         
-        // Create a deterministic random based on world seed and chunk coordinates
+        if (!enableLighting) return;
+        
         int chunkSeed = GetChunkSeed();
         System.Random deterministicRandom = new System.Random(chunkSeed);
         
-        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
+        // Sparse sampling for 16x16x16 chunks
+        int sampleStep = 2;
         
-        for (int i = 0; i < totalVoxels; i++)
+        for (int x = 0; x < chunkSize.x; x += sampleStep)
         {
-            if (voxelDataArray[i] != 0) // Solid voxel
+            for (int y = 1; y < chunkSize.y - 1; y += sampleStep)
             {
-                Vector3Int coord = IndexToCoord(i);
-                int x = coord.x;
-                int y = coord.y;
-                int z = coord.z;
-                
-                // Check if this is a ceiling voxel (solid below, empty above or at top)
-                bool isCeiling = false;
-                if (y == chunkSize.y - 1 || !GetVoxel(x, y + 1, z))
+                for (int z = 0; z < chunkSize.z; z += sampleStep)
                 {
-                    // Make sure there's floor below
-                    if (y > 0 && GetVoxel(x, y - 1, z))
+                    if (!GetVoxel(x, y, z)) continue;
+                    
+                    // Check if this is a ceiling voxel (air above, solid below)
+                    bool isCeiling = !GetVoxel(x, y + 1, z) && GetVoxel(x, y - 1, z);
+                    
+                    if (isCeiling)
                     {
-                        isCeiling = true;
-                    }
-                }
-                
-                if (isCeiling)
-                {
-                    // Create a deterministic hash for this specific position
-                    int positionHash = GetPositionHash(x, y, z);
-                    
-                    // Use the hash to create a deterministic random generator for this position
-                    System.Random positionRandom = new System.Random(positionHash);
-                    
-                    // Get deterministic value between 0 and 1
-                    float deterministicValue = (float)positionRandom.NextDouble();
-                    
-                    if (deterministicValue < lightPlacementChance)
-                    {
-                        lightPositions.Add(new Vector3Int(x, y, z));
-                    }
-                }
-            }
-        }
-        
-        // Ensure at least some lights per room if rooms exist
-        if (lightPositions.Count == 0)
-        {
-            // Find ceiling positions to add at least one light
-            List<Vector3Int> ceilingPositions = new List<Vector3Int>();
-            
-            for (int i = 0; i < totalVoxels; i++)
-            {
-                if (voxelDataArray[i] != 0)
-                {
-                    Vector3Int coord = IndexToCoord(i);
-                    int x = coord.x;
-                    int y = coord.y;
-                    int z = coord.z;
-                    
-                    if (y == chunkSize.y - 1 || !GetVoxel(x, y + 1, z))
-                    {
-                        if (y > 0 && GetVoxel(x, y - 1, z))
+                        int positionHash = GetPositionHash(x, y, z);
+                        float chance = (positionHash % 1000) / 1000f;
+                        
+                        if (chance < lightPlacementChance && lightPositions.Count < maxLightsPerChunk)
                         {
-                            ceilingPositions.Add(new Vector3Int(x, y, z));
+                            lightPositions.Add(new Vector3Int(x, y, z));
                         }
                     }
                 }
             }
-            
-            if (ceilingPositions.Count > 0)
-            {
-                // Use deterministic selection based on chunk seed
-                int index = deterministicRandom.Next(ceilingPositions.Count);
-                lightPositions.Add(ceilingPositions[index]);
-            }
-        }
-    }
-    
-    private void CalculateVoxelLightingOptimized()
-    {
-        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
-        
-        // Initialize light grid
-        for (int i = 0; i < totalVoxels; i++)
-        {
-            lightGridFlat[i] = 0f;
         }
         
-        // Set initial light values for light sources
-        foreach (var lightPos in lightPositions)
+        // Ensure at least one light if there are rooms
+        if (lightPositions.Count == 0 && HasRooms())
         {
-            int lightIndex = CoordToIndex(lightPos.x, lightPos.y, lightPos.z);
-            lightGridFlat[lightIndex] = lightSourceIntensity;
+            // Find center ceiling position
+            int centerX = chunkSize.x / 2;
+            int centerZ = chunkSize.z / 2;
             
-            // Light radiates from source into adjacent empty space
-            Vector3Int[] directions = {
-                Vector3Int.right, Vector3Int.left,
-                Vector3Int.up, Vector3Int.down,
-                Vector3Int.forward, Vector3Int.back
-            };
-            
-            foreach (var dir in directions)
+            for (int y = chunkSize.y - 1; y >= 0; y--)
             {
-                Vector3Int neighbor = lightPos + dir;
-                if (IsInGrid(neighbor) && !GetVoxel(neighbor.x, neighbor.y, neighbor.z))
+                if (GetVoxel(centerX, y, centerZ) && y < chunkSize.y - 1 && !GetVoxel(centerX, y + 1, centerZ))
                 {
-                    int neighborIndex = CoordToIndex(neighbor.x, neighbor.y, neighbor.z);
-                    lightGridFlat[neighborIndex] = Mathf.Max(lightGridFlat[neighborIndex], 
-                        lightSourceIntensity - lightDecay * 0.5f);
-                }
-            }
-        }
-        
-        // Propagate light through empty space using optimized algorithm
-        float[] newLightGrid = new float[totalVoxels];
-        System.Array.Copy(lightGridFlat, newLightGrid, totalVoxels);
-        
-        for (int step = 0; step < lightPropagationSteps; step++)
-        {
-            // Parallel processing for performance
-            Parallel.For(0, totalVoxels, i =>
-            {
-                if (voxelDataArray[i] != 0) return; // Skip solid voxels
-                
-                Vector3Int coord = IndexToCoord(i);
-                float maxNeighborLight = 0f;
-                
-                // Check all 6 directions
-                if (coord.x > 0)
-                {
-                    int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
-                    if (voxelDataArray[leftIndex] == 0) // Empty voxel
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[leftIndex]);
-                }
-                
-                if (coord.x < chunkSize.x - 1)
-                {
-                    int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
-                    if (voxelDataArray[rightIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[rightIndex]);
-                }
-                
-                if (coord.y > 0)
-                {
-                    int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
-                    if (voxelDataArray[downIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[downIndex]);
-                }
-                
-                if (coord.y < chunkSize.y - 1)
-                {
-                    int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
-                    if (voxelDataArray[upIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[upIndex]);
-                }
-                
-                if (coord.z > 0)
-                {
-                    int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
-                    if (voxelDataArray[backIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[backIndex]);
-                }
-                
-                if (coord.z < chunkSize.z - 1)
-                {
-                    int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
-                    if (voxelDataArray[forwardIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[forwardIndex]);
-                }
-                
-                float propagatedLight = Mathf.Max(0, maxNeighborLight - lightDecay);
-                newLightGrid[i] = Mathf.Max(newLightGrid[i], propagatedLight);
-            });
-            
-            // Swap grids
-            float[] temp = lightGridFlat;
-            lightGridFlat = newLightGrid;
-            newLightGrid = temp;
-        }
-        
-        // Solid voxels receive light from adjacent empty voxels
-        Parallel.For(0, totalVoxels, i =>
-        {
-            if (voxelDataArray[i] == 0) return; // Skip empty voxels
-            
-            Vector3Int coord = IndexToCoord(i);
-            
-            // Check if this is a light source
-            bool isLightSource = false;
-            foreach (var lightPos in lightPositions)
-            {
-                if (lightPos.x == coord.x && lightPos.y == coord.y && lightPos.z == coord.z)
-                {
-                    isLightSource = true;
+                    lightPositions.Add(new Vector3Int(centerX, y, centerZ));
                     break;
                 }
             }
-            
-            if (isLightSource)
-            {
-                lightGridFlat[i] = lightSourceIntensity;
-                return;
-            }
-            
-            float maxAdjacentLight = 0f;
-            
-            if (coord.x > 0)
-            {
-                int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
-                if (voxelDataArray[leftIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[leftIndex]);
-            }
-            
-            if (coord.x < chunkSize.x - 1)
-            {
-                int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
-                if (voxelDataArray[rightIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[rightIndex]);
-            }
-            
-            if (coord.y > 0)
-            {
-                int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
-                if (voxelDataArray[downIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[downIndex]);
-            }
-            
-            if (coord.y < chunkSize.y - 1)
-            {
-                int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
-                if (voxelDataArray[upIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[upIndex]);
-            }
-            
-            if (coord.z > 0)
-            {
-                int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
-                if (voxelDataArray[backIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[backIndex]);
-            }
-            
-            if (coord.z < chunkSize.z - 1)
-            {
-                int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
-                if (voxelDataArray[forwardIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[forwardIndex]);
-            }
-            
-            lightGridFlat[i] = Mathf.Max(lightGridFlat[i], maxAdjacentLight * 0.7f);
-        });
-        
-        // Convert back to 3D array
-        ConvertFromFlatArray();
+        }
     }
     
-    // NEW: Generate mesh with flat lighting (all vertices of a face have same light)
-    private void GenerateFlatLitMesh()
+    private bool HasRooms()
     {
-        MeshData meshData = new MeshData();
-        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
-        
-        // Pre-allocate lists with estimated capacity
-        int estimatedFaces = totalVoxels / 2; // Rough estimate
-        meshData.vertices.Capacity = estimatedFaces * 4;
-        meshData.triangles.Capacity = estimatedFaces * 6;
-        meshData.uv.Capacity = estimatedFaces * 4;
-        meshData.colors.Capacity = estimatedFaces * 4;
-        meshData.normals.Capacity = estimatedFaces * 4;
-        
-        for (int i = 0; i < totalVoxels; i++)
+        // Quick check for solid blocks (potential rooms)
+        int solidCount = 0;
+        for (int i = 0; i < voxelDataArray.Length; i++)
         {
             if (voxelDataArray[i] != 0)
-            {
-                Vector3Int coord = IndexToCoord(i);
-                AddFlatLitFaces(coord.x, coord.y, coord.z, meshData);
-            }
+                solidCount++;
         }
-        
-        ApplyMesh(meshData);
+        return solidCount > 10; // Arbitrary threshold
     }
     
-    // NEW: Generate mesh with smooth vertex lighting
-    private void GenerateSmoothLitMesh()
+    private void CalculateLightingBFS()
     {
-        MeshData meshData = new MeshData();
-        int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
+        if (!enableLighting) return;
         
-        // Pre-allocate lists with estimated capacity
-        int estimatedFaces = totalVoxels / 2;
-        meshData.vertices.Capacity = estimatedFaces * 4;
-        meshData.triangles.Capacity = estimatedFaces * 6;
-        meshData.uv.Capacity = estimatedFaces * 4;
-        meshData.colors.Capacity = estimatedFaces * 4;
-        meshData.normals.Capacity = estimatedFaces * 4;
-        
-        // Clear vertex light cache for this chunk
-        vertexLightCache.Clear();
-        
-        for (int i = 0; i < totalVoxels; i++)
+        // Initialize light map
+        if (lightMap == null || 
+            lightMap.GetLength(0) != chunkSize.x ||
+            lightMap.GetLength(1) != chunkSize.y ||
+            lightMap.GetLength(2) != chunkSize.z)
         {
-            if (voxelDataArray[i] != 0)
-            {
-                Vector3Int coord = IndexToCoord(i);
-                AddSmoothLitFaces(coord.x, coord.y, coord.z, meshData);
-            }
+            lightMap = new byte[chunkSize.x, chunkSize.y, chunkSize.z];
+        }
+        else
+        {
+            // Fast clear
+            System.Array.Clear(lightMap, 0, lightMap.Length);
         }
         
-        ApplyMesh(meshData);
-    }
-    
-    // NEW: Flat lighting version - all vertices of a face get the same light level
-    private void AddFlatLitFaces(int x, int y, int z, MeshData meshData)
-    {
-        Vector3 offset = new Vector3(x, y, z);
+        lightBfsQueue.Clear();
         
-        // Check if this is a light source
-        bool isLightSource = false;
+        // Initialize light sources
         foreach (var lightPos in lightPositions)
         {
-            if (lightPos.x == x && lightPos.y == y && lightPos.z == z)
+            lightMap[lightPos.x, lightPos.y, lightPos.z] = (byte)maxLightLevel;
+            lightBfsQueue.Enqueue(lightPos);
+        }
+        
+        // BFS propagation (like Minecraft)
+        Vector3Int[] directions = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+        
+        while (lightBfsQueue.Count > 0)
+        {
+            Vector3Int current = lightBfsQueue.Dequeue();
+            byte currentLight = lightMap[current.x, current.y, current.z];
+            
+            if (currentLight <= minLightLevel) continue;
+            
+            byte nextLight = (byte)(currentLight - 1);
+            
+            foreach (var dir in directions)
             {
-                isLightSource = true;
-                break;
-            }
-        }
-        
-        // LEFT FACE (Negative X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.left))
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.left);
-            AddFace(offset, 
-                new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
-                meshData, materialID, false, faceLight, faceLight, faceLight, faceLight);
-        }
-        
-        // RIGHT FACE (Positive X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.right))
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.right);
-            AddFace(offset, 
-                new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
-                meshData, materialID, false, faceLight, faceLight, faceLight, faceLight);
-        }
-        
-        // BOTTOM FACE (Negative Y) - FLOOR
-        if (ShouldGenerateFace(x, y, z, Vector3Int.down))
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_FLOOR;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.down);
-            AddFace(offset, 
-                new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
-                meshData, materialID, true, faceLight, faceLight, faceLight, faceLight);
-        }
-        
-        // TOP FACE (Positive Y) - CEILING
-        if (ShouldGenerateFace(x, y, z, Vector3Int.up))
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_CEILING;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.up);
-            AddFace(offset, 
-                new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
-                meshData, materialID, true, faceLight, faceLight, faceLight, faceLight);
-        }
-        
-        // FRONT FACE (Negative Z)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.back))
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.back);
-            AddFace(offset, 
-                new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
-                meshData, materialID, false, faceLight, faceLight, faceLight, faceLight);
-        }
-        
-        // BACK FACE (Positive Z)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.forward))
-        {
-            byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.forward);
-            AddFace(offset, 
-                new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
-                meshData, materialID, false, faceLight, faceLight, faceLight, faceLight);
-        }
-    }
-    
-    // NEW: Smooth lighting version - each vertex gets its own light level
-    private void AddSmoothLitFaces(int x, int y, int z, MeshData meshData)
-    {
-        Vector3 offset = new Vector3(x, y, z);
-        
-        // Check if this is a light source
-        bool isLightSource = false;
-        foreach (var lightPos in lightPositions)
-        {
-            if (lightPos.x == x && lightPos.y == y && lightPos.z == z)
-            {
-                isLightSource = true;
-                break;
-            }
-        }
-        
-        byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-        
-        // LEFT FACE (Negative X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.left))
-        {
-            float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 0), Vector3Int.left);
-            float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 0), Vector3Int.left);
-            float v2Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 1), Vector3Int.left);
-            float v3Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 1), Vector3Int.left);
-            
-            AddFace(offset, 
-                new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
-                meshData, materialID, false, v0Light, v1Light, v2Light, v3Light);
-        }
-        
-        // RIGHT FACE (Positive X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.right))
-        {
-            float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 0, 1), Vector3Int.right);
-            float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 1, 1), Vector3Int.right);
-            float v2Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 1, 0), Vector3Int.right);
-            float v3Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 0, 0), Vector3Int.right);
-            
-            AddFace(offset, 
-                new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
-                meshData, materialID, false, v0Light, v1Light, v2Light, v3Light);
-        }
-        
-        // BOTTOM FACE (Negative Y) - FLOOR
-        if (ShouldGenerateFace(x, y, z, Vector3Int.down))
-        {
-            materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_FLOOR;
-            float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 1), Vector3Int.down);
-            float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 0, 1), Vector3Int.down);
-            float v2Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 0, 0), Vector3Int.down);
-            float v3Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 0), Vector3Int.down);
-            
-            AddFace(offset, 
-                new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
-                meshData, materialID, true, v0Light, v1Light, v2Light, v3Light);
-        }
-        
-        // TOP FACE (Positive Y) - CEILING
-        if (ShouldGenerateFace(x, y, z, Vector3Int.up))
-        {
-            materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_CEILING;
-            float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 0), Vector3Int.up);
-            float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 1, 0), Vector3Int.up);
-            float v2Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 1, 1), Vector3Int.up);
-            float v3Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 1), Vector3Int.up);
-            
-            AddFace(offset, 
-                new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
-                meshData, materialID, true, v0Light, v1Light, v2Light, v3Light);
-        }
-        
-        // FRONT FACE (Negative Z)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.back))
-        {
-            materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 0), Vector3Int.back);
-            float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 0, 0), Vector3Int.back);
-            float v2Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 1, 0), Vector3Int.back);
-            float v3Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 0), Vector3Int.back);
-            
-            AddFace(offset, 
-                new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
-                meshData, materialID, false, v0Light, v1Light, v2Light, v3Light);
-        }
-        
-        // BACK FACE (Positive Z)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.forward))
-        {
-            materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
-            float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 0, 1), Vector3Int.forward);
-            float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 1), Vector3Int.forward);
-            float v2Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 1), Vector3Int.forward);
-            float v3Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(1, 1, 1), Vector3Int.forward);
-            
-            AddFace(offset, 
-                new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
-                meshData, materialID, false, v0Light, v1Light, v2Light, v3Light);
-        }
-    }
-    
-    // NEW: Get light level at a specific vertex position
-    private float GetVertexLightLevel(Vector3Int vertexPos, Vector3Int faceNormal)
-    {
-        // Check cache first
-        if (vertexLightCache.TryGetValue(vertexPos, out float cachedLight))
-            return cachedLight;
-        
-        // Sample light from the 8 surrounding voxels (including diagonals)
-        float totalLight = 0f;
-        int samples = 0;
-        
-        for (int dx = -1; dx <= 0; dx++) // Only check 4 relevant corners for this vertex
-        {
-            for (int dy = -1; dy <= 0; dy++)
-            {
-                for (int dz = -1; dz <= 0; dz++)
+                Vector3Int neighbor = current + dir;
+                
+                if (!IsInGrid(neighbor)) continue;
+                
+                // Skip solid blocks (they don't propagate light)
+                if (GetVoxel(neighbor.x, neighbor.y, neighbor.z)) continue;
+                
+                byte neighborLight = lightMap[neighbor.x, neighbor.y, neighbor.z];
+                
+                if (neighborLight < nextLight)
                 {
-                    Vector3Int samplePos = new Vector3Int(
-                        vertexPos.x + dx,
-                        vertexPos.y + dy,
-                        vertexPos.z + dz
-                    );
+                    lightMap[neighbor.x, neighbor.y, neighbor.z] = nextLight;
                     
-                    // Check if sample position is within grid
-                    if (samplePos.x >= 0 && samplePos.x < chunkSize.x &&
-                        samplePos.y >= 0 && samplePos.y < chunkSize.y &&
-                        samplePos.z >= 0 && samplePos.z < chunkSize.z)
+                    if (nextLight > minLightLevel)
                     {
-                        // Get light from this voxel
-                        totalLight += lightGrid[samplePos.x, samplePos.y, samplePos.z];
-                        samples++;
+                        lightBfsQueue.Enqueue(neighbor);
                     }
-                    else
+                }
+            }
+        }
+    }
+    
+    private void GenerateFlatLitMesh(Mesh mesh)
+    {
+        List<Vector3> vertices = new List<Vector3>();
+        List<int> triangles = new List<int>();
+        List<Vector2> uv = new List<Vector2>();
+        List<Color> colors = new List<Color>();
+        List<Vector3> normals = new List<Vector3>();
+        
+        // Pre-allocate with reasonable capacity
+        int estimatedFaces = chunkSize.x * chunkSize.y * 2;
+        vertices.Capacity = estimatedFaces * 4;
+        triangles.Capacity = estimatedFaces * 6;
+        
+        // Generate faces with per-face lighting
+        for (int x = 0; x < chunkSize.x; x++)
+        {
+            for (int y = 0; y < chunkSize.y; y++)
+            {
+                for (int z = 0; z < chunkSize.z; z++)
+                {
+                    if (!GetVoxel(x, y, z)) continue;
+                    
+                    Vector3 offset = new Vector3(x, y, z);
+                    
+                    // Check if this is a light source
+                    bool isLightSource = false;
+                    foreach (var lightPos in lightPositions)
                     {
-                        // For boundary vertices, we might need cross-chunk light data
-                        // For simplicity, use the nearest available light value
-                        Vector3Int clampedPos = new Vector3Int(
-                            Mathf.Clamp(samplePos.x, 0, chunkSize.x - 1),
-                            Mathf.Clamp(samplePos.y, 0, chunkSize.y - 1),
-                            Mathf.Clamp(samplePos.z, 0, chunkSize.z - 1)
-                        );
-                        
-                        totalLight += lightGrid[clampedPos.x, clampedPos.y, clampedPos.z];
-                        samples++;
+                        if (lightPos.x == x && lightPos.y == y && lightPos.z == z)
+                        {
+                            isLightSource = true;
+                            break;
+                        }
+                    }
+                    
+                    byte materialID = GetMaterialID(x, y, z, isLightSource);
+                    
+                    // Generate faces only if adjacent voxel is empty
+                    if (ShouldGenerateFace(x, y, z, Vector3Int.left))
+                    {
+                        float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.left);
+                        AddFace(offset, 
+                            new Vector3(0,0,0), new Vector3(0,1,0), new Vector3(0,1,1), new Vector3(0,0,1),
+                            vertices, triangles, uv, colors, normals, 
+                            materialID, false, faceLight);
+                    }
+                    
+                    if (ShouldGenerateFace(x, y, z, Vector3Int.right))
+                    {
+                        float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.right);
+                        AddFace(offset, 
+                            new Vector3(1,0,1), new Vector3(1,1,1), new Vector3(1,1,0), new Vector3(1,0,0),
+                            vertices, triangles, uv, colors, normals, 
+                            materialID, false, faceLight);
+                    }
+                    
+                    if (ShouldGenerateFace(x, y, z, Vector3Int.down))
+                    {
+                        float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.down);
+                        AddFace(offset, 
+                            new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
+                            vertices, triangles, uv, colors, normals, 
+                            materialID, true, faceLight);
+                    }
+                    
+                    if (ShouldGenerateFace(x, y, z, Vector3Int.up))
+                    {
+                        float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.up);
+                        AddFace(offset, 
+                            new Vector3(0,1,0), new Vector3(1,1,0), new Vector3(1,1,1), new Vector3(0,1,1),
+                            vertices, triangles, uv, colors, normals, 
+                            materialID, true, faceLight);
+                    }
+                    
+                    if (ShouldGenerateFace(x, y, z, Vector3Int.back))
+                    {
+                        float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.back);
+                        AddFace(offset, 
+                            new Vector3(0,0,0), new Vector3(1,0,0), new Vector3(1,1,0), new Vector3(0,1,0),
+                            vertices, triangles, uv, colors, normals, 
+                            materialID, false, faceLight);
+                    }
+                    
+                    if (ShouldGenerateFace(x, y, z, Vector3Int.forward))
+                    {
+                        float faceLight = GetFaceLightLevel(x, y, z, Vector3Int.forward);
+                        AddFace(offset, 
+                            new Vector3(1,0,1), new Vector3(0,0,1), new Vector3(0,1,1), new Vector3(1,1,1),
+                            vertices, triangles, uv, colors, normals, 
+                            materialID, false, faceLight);
                     }
                 }
             }
         }
         
-        float vertexLight = samples > 0 ? totalLight / samples : 0f;
+        // Apply to mesh
+        if (vertices.Count == 0)
+        {
+            ClearMesh();
+            return;
+        }
         
-        // Cache the result
-        vertexLightCache[vertexPos] = vertexLight;
+        mesh.vertices = vertices.ToArray();
+        mesh.triangles = triangles.ToArray();
+        mesh.uv = uv.ToArray();
+        mesh.colors = colors.ToArray();
+        mesh.normals = normals.ToArray();
+        mesh.RecalculateBounds();
         
-        return vertexLight;
+        if (mesh.vertexCount > 65535)
+            mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+    }
+    
+    private void GenerateSmoothLitMesh(Mesh mesh)
+    {
+        // For now, just use flat lighting for performance
+        GenerateFlatLitMesh(mesh);
+    }
+    
+    private byte GetMaterialID(int x, int y, int z, bool isLightSource)
+    {
+        if (isLightSource) return MATERIAL_LIGHT;
+        
+        // Determine material based on face orientation (simplified)
+        if (y == 0 || !GetVoxel(x, y - 1, z)) return MATERIAL_FLOOR; // Bottom face
+        if (y == chunkSize.y - 1 || !GetVoxel(x, y + 1, z)) return MATERIAL_CEILING; // Top face
+        return MATERIAL_WALL; // Everything else
     }
     
     private bool ShouldGenerateFace(int x, int y, int z, Vector3Int direction)
     {
-        // Check adjacent voxel in this chunk
         Vector3Int adjPos = new Vector3Int(x, y, z) + direction;
         
         if (IsInGrid(adjPos))
@@ -661,9 +446,25 @@ public class DungeonChunk : MonoBehaviour
         }
         else
         {
-            // This voxel is at a chunk boundary
+            // At chunk boundary - check adjacent chunk if possible
             return !IsSolidInAdjacentChunk(x, y, z, direction);
         }
+    }
+    
+    private float GetFaceLightLevel(int x, int y, int z, Vector3Int faceNormal)
+    {
+        if (!enableLighting) return 1.0f;
+        
+        Vector3Int adjPos = new Vector3Int(x, y, z) + faceNormal;
+        
+        if (IsInGrid(adjPos) && !GetVoxel(adjPos.x, adjPos.y, adjPos.z))
+        {
+            // Air block adjacent - use its light
+            return lightMap[adjPos.x, adjPos.y, adjPos.z] / (float)maxLightLevel;
+        }
+        
+        // Inside solid or at boundary - use minimal ambient light
+        return 0.1f;
     }
     
     private bool IsSolidInAdjacentChunk(int x, int y, int z, Vector3Int direction)
@@ -674,11 +475,11 @@ public class DungeonChunk : MonoBehaviour
             if (chunkManager == null) return false;
         }
         
-        // Calculate which adjacent chunk we need to check
+        // Calculate adjacent chunk coordinate
         Vector3Int adjacentChunkCoord = chunkCoord;
         Vector3Int localPosInAdjacentChunk = new Vector3Int(x, y, z);
         
-        // Adjust chunk coordinate and local position based on direction
+        // Adjust based on direction
         if (direction.x == -1 && x == 0) // Left boundary
         {
             adjacentChunkCoord += Vector3Int.left;
@@ -711,158 +512,78 @@ public class DungeonChunk : MonoBehaviour
         }
         else
         {
-            // Not at boundary in this direction
             return false;
         }
         
-        // Check if adjacent chunk is loaded
+        // Try to get voxel data from adjacent chunk
         if (chunkManager.TryGetVoxelData(adjacentChunkCoord, localPosInAdjacentChunk, out bool isSolid))
         {
             return isSolid;
         }
         
-        // If adjacent chunk isn't loaded, we can't know for sure
-        return false;
+        return false; // Assume not solid if chunk not loaded
     }
     
-    private float GetFaceLightLevel(int x, int y, int z, Vector3Int faceNormal)
-    {
-        // Get light from the empty space adjacent to this face
-        Vector3Int adjPos = new Vector3Int(x, y, z) + faceNormal;
-        
-        if (IsInGrid(adjPos))
-        {
-            if (!GetVoxel(adjPos.x, adjPos.y, adjPos.z))
-            {
-                return lightGrid[adjPos.x, adjPos.y, adjPos.z];
-            }
-        }
-        
-        // If adjacent is solid or out of bounds, use this voxel's light
-        return lightGrid[x, y, z];
-    }
-    
-    // MODIFIED: Now accepts individual light values for each vertex
     private void AddFace(Vector3 offset, Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3,
-                        MeshData meshData, byte materialID, bool isHorizontal, 
-                        float light0, float light1, float light2, float light3)
+                        List<Vector3> vertices, List<int> triangles, List<Vector2> uv, 
+                        List<Color> colors, List<Vector3> normals,
+                        byte materialID, bool isHorizontal, float faceLight)
     {
-        int baseIndex = meshData.vertices.Count;
+        int baseIndex = vertices.Count;
         
         // Add vertices
-        meshData.vertices.Add(v0 + offset);
-        meshData.vertices.Add(v1 + offset);
-        meshData.vertices.Add(v2 + offset);
-        meshData.vertices.Add(v3 + offset);
+        vertices.Add(v0 + offset);
+        vertices.Add(v1 + offset);
+        vertices.Add(v2 + offset);
+        vertices.Add(v3 + offset);
         
         // Add triangles
-        meshData.triangles.Add(baseIndex);
-        meshData.triangles.Add(baseIndex + 1);
-        meshData.triangles.Add(baseIndex + 2);
-        meshData.triangles.Add(baseIndex + 2);
-        meshData.triangles.Add(baseIndex + 3);
-        meshData.triangles.Add(baseIndex);
+        triangles.Add(baseIndex);
+        triangles.Add(baseIndex + 1);
+        triangles.Add(baseIndex + 2);
+        triangles.Add(baseIndex + 2);
+        triangles.Add(baseIndex + 3);
+        triangles.Add(baseIndex);
         
-        // Add UVs with texture scaling
-        float width = 1f;
-        float height = 1f;
-        
+        // Add UVs
         if (isHorizontal)
         {
-            width = Vector3.Distance(v0, v3);
-            height = Vector3.Distance(v0, v1);
-            meshData.uv.Add(new Vector2(0, 0));
-            meshData.uv.Add(new Vector2(0, height * textureScale.y));
-            meshData.uv.Add(new Vector2(width * textureScale.x, height * textureScale.y));
-            meshData.uv.Add(new Vector2(width * textureScale.x, 0));
+            uv.Add(new Vector2(0, 0));
+            uv.Add(new Vector2(0, textureScale.y));
+            uv.Add(new Vector2(textureScale.x, textureScale.y));
+            uv.Add(new Vector2(textureScale.x, 0));
         }
         else
         {
-            width = Vector3.Distance(v0, v1);
-            height = Vector3.Distance(v0, v3);
-            meshData.uv.Add(new Vector2(0, 0));
-            meshData.uv.Add(new Vector2(0, height * textureScale.y));
-            meshData.uv.Add(new Vector2(width * textureScale.x, height * textureScale.y));
-            meshData.uv.Add(new Vector2(width * textureScale.x, 0));
+            uv.Add(new Vector2(0, 0));
+            uv.Add(new Vector2(0, textureScale.y));
+            uv.Add(new Vector2(textureScale.x, textureScale.y));
+            uv.Add(new Vector2(textureScale.x, 0));
         }
         
-        // Calculate face normal
+        // Calculate normal
         Vector3 normal = Vector3.Cross(v1 - v0, v2 - v1).normalized;
-        if (isHorizontal && normal.y < 0) normal = -normal;
         
-        // Add normals
+        // Add normals (all same for flat shading)
         for (int i = 0; i < 4; i++)
         {
-            meshData.normals.Add(normal);
+            normals.Add(normal);
         }
         
-        // Add colors with individual light values
-        meshData.colors.Add(new Color(materialID / 3f, light0, 0, 1));
-        meshData.colors.Add(new Color(materialID / 3f, light1, 0, 1));
-        meshData.colors.Add(new Color(materialID / 3f, light2, 0, 1));
-        meshData.colors.Add(new Color(materialID / 3f, light3, 0, 1));
+        // Add colors with lighting
+        Color color = new Color(materialID / 3f, faceLight, 0, 1);
+        colors.Add(color);
+        colors.Add(color);
+        colors.Add(color);
+        colors.Add(color);
     }
     
-    private void ApplyMesh(MeshData meshData)
+    private void ClearMesh()
     {
-        if (meshData == null || meshData.vertices.Count == 0)
-        {
-            if (meshFilter != null) meshFilter.mesh = null;
-            if (meshCollider != null) meshCollider.sharedMesh = null;
-            return;
-        }
-        
-        try
-        {
-            Mesh mesh = new Mesh();
-            
-            if (meshData.vertices.Count > 65535)
-                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-                
-            mesh.vertices = meshData.vertices.ToArray();
-            mesh.triangles = meshData.triangles.ToArray();
-            mesh.uv = meshData.uv.ToArray();
-            mesh.colors = meshData.colors.ToArray();
-            mesh.normals = meshData.normals.ToArray();
-            
-            mesh.RecalculateBounds();
-            
-            if (mesh.vertexCount > 0)
-                mesh.Optimize();
-            
-            if (meshFilter != null) meshFilter.mesh = mesh;
-            if (meshCollider != null) meshCollider.sharedMesh = mesh;
-            
-            /*if (meshRenderer != null && meshRenderer.material != null)
-            {
-                if (wallTexture != null)
-                    meshRenderer.material.SetTexture("_WallTex", wallTexture);
-                if (floorTexture != null)
-                    meshRenderer.material.SetTexture("_FloorTex", floorTexture);
-                if (ceilingTexture != null)
-                    meshRenderer.material.SetTexture("_CeilingTex", ceilingTexture);
-            }*/ // Textures are already set in the shader inspector as default
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Error applying mesh: {e.Message}");
-        }
-    }
-    
-    private void ConvertFromFlatArray()
-    {
-        int index = 0;
-        lightGrid = new float[chunkSize.x, chunkSize.y, chunkSize.z];
-        for (int x = 0; x < chunkSize.x; x++)
-        {
-            for (int y = 0; y < chunkSize.y; y++)
-            {
-                for (int z = 0; z < chunkSize.z; z++)
-                {
-                    lightGrid[x, y, z] = lightGridFlat[index++];
-                }
-            }
-        }
+        if (meshFilter != null && meshFilter.mesh != null)
+            Destroy(meshFilter.mesh);
+        if (meshCollider != null)
+            meshCollider.sharedMesh = null;
     }
     
     // Helper methods
@@ -896,13 +617,11 @@ public class DungeonChunk : MonoBehaviour
     
     private int GetChunkSeed()
     {
-        // Combine world seed with chunk coordinates for a unique but deterministic seed
         return worldSeed ^ (chunkCoord.x * 73856093) ^ (chunkCoord.y * 19349663) ^ (chunkCoord.z * 83492791);
     }
     
     private int GetPositionHash(int x, int y, int z)
     {
-        // Create a unique hash for a specific position within this chunk
         int hash = 17;
         hash = hash * 31 + worldSeed;
         hash = hash * 31 + chunkCoord.x;
@@ -916,16 +635,10 @@ public class DungeonChunk : MonoBehaviour
     
     public void Clear()
     {
-        if (meshFilter != null && meshFilter.mesh != null)
-            Destroy(meshFilter.mesh);
-        if (meshCollider != null && meshCollider.sharedMesh != null)
-            meshCollider.sharedMesh = null;
-            
-        lightGrid = null;
+        ClearMesh();
         lightPositions.Clear();
         voxelDataArray = null;
-        lightGridFlat = null;
-        vertexLightCache.Clear();
+        lightMap = null;
     }
     
     public void UpdateBoundaryMeshes()
@@ -934,14 +647,5 @@ public class DungeonChunk : MonoBehaviour
         {
             GenerateMesh(voxelData);
         }
-    }
-    
-    private class MeshData
-    {
-        public List<Vector3> vertices = new List<Vector3>();
-        public List<int> triangles = new List<int>();
-        public List<Vector2> uv = new List<Vector2>();
-        public List<Color> colors = new List<Color>();
-        public List<Vector3> normals = new List<Vector3>();
     }
 }
