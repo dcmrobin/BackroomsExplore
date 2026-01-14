@@ -123,6 +123,94 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
+--- !u!1 &709615691
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 709615692}
+  - component: {fileID: 709615694}
+  - component: {fileID: 709615693}
+  m_Layer: 0
+  m_Name: OptimizedManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &709615692
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 709615691}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &709615693
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 709615691}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6904fd61970ef974ea152cc19a0b1f75, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  chunkSize:
+    x: 16
+    y: 16
+    z: 16
+  renderDistance: 3
+  useObjectPooling: 1
+  maxChunksPerFrame: 1
+  maxQueuedJobs: 4
+  useJobSystem: 1
+  colliderActivationDistance: 32
+  disableDistantColliders: 1
+  worldSeed: 123456
+  randomizeSeed: 1
+  chunkPrefab: {fileID: 2503583468352547315, guid: 82849914f737e544c87845d2e2721229, type: 3}
+  playerTransform: {fileID: 1585999911}
+--- !u!114 &709615694
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 709615691}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1df4aa255ae9bbb469c1035b6a6f73aa, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  noiseScale: {x: 0.05, y: 0.05, z: 0.05}
+  useNoiseCache: 0
+  roomThreshold: 0.3
+  roomExpansionThreshold: 0.3
+  minRoomSize: 7
+  maxRoomSize: 40
+  roomScanStep: 4
+  maxExpansionSteps: 20
+  gridAlignment: 1
+  minCorridorWidth: 3
+  maxCorridorWidth: 5
+  corridorHeight: 4
+  verticalShaftSize: 3
+  verticalConnectionChance: 0.3
+  maxRoomsPerChunk: 10
+  maxCorridorsPerChunk: 5
 --- !u!1 &1367147925
 GameObject:
   m_ObjectHideFlags: 0
@@ -302,7 +390,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &1882148089
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -379,3 +467,4 @@ SceneRoots:
   - {fileID: 1585999911}
   - {fileID: 1367147927}
   - {fileID: 1882148090}
+  - {fileID: 709615692}
