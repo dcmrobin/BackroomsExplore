@@ -196,12 +196,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   noiseScale: {x: 0.05, y: 0.05, z: 0.05}
+  noiseOffset: {x: 0, y: 0, z: 0}
   useNoiseCache: 0
-  roomThreshold: 0.3
-  roomExpansionThreshold: 0.3
+  roomThreshold: 0.4
+  roomExpansionThreshold: 0.37
   minRoomSize: 7
   maxRoomSize: 40
-  roomScanStep: 4
+  roomScanStep: 2
   maxExpansionSteps: 20
   gridAlignment: 1
   minCorridorWidth: 3
@@ -211,6 +212,8 @@ MonoBehaviour:
   verticalConnectionChance: 0.3
   maxRoomsPerChunk: 10
   maxCorridorsPerChunk: 5
+  spatialGridSize: 32
+  readRadius: 2
 --- !u!1 &1367147925
 GameObject:
   m_ObjectHideFlags: 0
