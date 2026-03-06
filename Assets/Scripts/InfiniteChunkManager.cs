@@ -8,12 +8,12 @@ using Unity.Burst;
 public class InfiniteChunkManager : MonoBehaviour
 {
     [Header("Chunk Settings")]
-    public Vector3Int chunkSize = new Vector3Int(16, 16, 16); // 16x16x16 for performance
+    public Vector3Int chunkSize = new Vector3Int(80, 40, 80);
     [SerializeField] private int renderDistance = 3;
     [SerializeField] private bool useObjectPooling = true;
     
     [Header("Generation Settings")]
-    [SerializeField] private int maxChunksPerFrame = 2; // Can do 2 with small chunks
+    [SerializeField] private int maxChunksPerFrame = 1;
     [SerializeField] private bool cancelDistantGeneration = true;
     [SerializeField] private bool asyncGeneration = false;
     
@@ -44,8 +44,10 @@ public class InfiniteChunkManager : MonoBehaviour
     
     // Track chunks that need boundary updates
     private HashSet<int> chunksNeedingBoundaryUpdate = new HashSet<int>();
+    private readonly List<int> chunksToUnloadBuffer = new List<int>();
+    private readonly List<int> boundaryUpdateBuffer = new List<int>();
     
-    // Coordinate hashing
+    // Coordinate hashing (faster than Vector3Int for dictionary keys)
     private const int HASH_PRIME_X = 73856093;
     private const int HASH_PRIME_Y = 19349663;
     private const int HASH_PRIME_Z = 83492791;
@@ -58,6 +60,7 @@ public class InfiniteChunkManager : MonoBehaviour
         
         public int CompareTo(ChunkGenerationTask other)
         {
+            // Primary sort by priority, secondary by timestamp (FIFO for same priority)
             int priorityCompare = priority.CompareTo(other.priority);
             if (priorityCompare != 0)
                 return priorityCompare;
@@ -79,6 +82,7 @@ public class InfiniteChunkManager : MonoBehaviour
                 if (heap[i].CompareTo(heap[parent]) >= 0)
                     break;
                     
+                // Swap
                 T temp = heap[i];
                 heap[i] = heap[parent];
                 heap[parent] = temp;
@@ -208,12 +212,13 @@ public class InfiniteChunkManager : MonoBehaviour
         
         if (currentPlayerChunkCoord != lastPlayerChunkCoord)
         {
+            int movedDistance = GetChunkDistance(currentPlayerChunkCoord, lastPlayerChunkCoord);
             UpdateGenerationQueue();
             lastPlayerChunkCoord = currentPlayerChunkCoord;
             
-            if (GetChunkDistance(currentPlayerChunkCoord, lastPlayerChunkCoord) > 2)
+            if (movedDistance > 2)
             {
-                roomGenerator.PruneDistantData(currentPlayerChunkCoord);
+roomGenerator.PruneDistantData(currentPlayerChunkCoord);
             }
         }
         
@@ -235,24 +240,8 @@ public class InfiniteChunkManager : MonoBehaviour
     
     private void UpdateGenerationQueue()
     {
-        // Clear only tasks for chunks that are now out of range
-        List<ChunkGenerationTask> tasksToKeep = new List<ChunkGenerationTask>();
-        while (generationQueue.TryDequeue(out ChunkGenerationTask task))
-        {
-            int distance = GetChunkDistance(task.chunkCoord, currentPlayerChunkCoord);
-            if (distance <= renderDistance)
-            {
-                tasksToKeep.Add(task);
-            }
-        }
+        generationQueue.Clear();
         
-        // Re-add kept tasks
-        foreach (var task in tasksToKeep)
-        {
-            generationQueue.Enqueue(task);
-        }
-        
-        // Add new tasks
         for (int x = -renderDistance; x <= renderDistance; x++)
         {
             for (int y = -1; y <= 1; y++)
@@ -263,8 +252,7 @@ public class InfiniteChunkManager : MonoBehaviour
                     int chunkHash = HashCoordinate(chunkCoord);
                     
                     if (loadedChunks.ContainsKey(chunkHash) || 
-                        currentlyGenerating.Contains(chunkHash) ||
-                        generationQueue.ContainsCoord(chunkCoord))
+                        currentlyGenerating.Contains(chunkHash))
                         continue;
                     
                     int distance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
@@ -280,8 +268,7 @@ public class InfiniteChunkManager : MonoBehaviour
             }
         }
         
-        // Unload distant chunks
-        List<int> chunksToUnload = new List<int>();
+        chunksToUnloadBuffer.Clear();
         foreach (var kvp in loadedChunks)
         {
             Vector3Int chunkWorldPos = Vector3Int.FloorToInt(kvp.Value.GetChunkWorldPosition());
@@ -290,11 +277,11 @@ public class InfiniteChunkManager : MonoBehaviour
             
             if (distance > renderDistance)
             {
-                chunksToUnload.Add(kvp.Key);
+                chunksToUnloadBuffer.Add(kvp.Key);
             }
         }
         
-        foreach (var chunkHash in chunksToUnload)
+        foreach (var chunkHash in chunksToUnloadBuffer)
         {
             UnloadChunk(chunkHash);
         }
@@ -302,10 +289,10 @@ public class InfiniteChunkManager : MonoBehaviour
     
     private int CalculatePriority(int distance, Vector3Int chunkCoord)
     {
-        if (distance == 0) return 0; // Player's chunk
-        if (distance == 1) return 1; // Immediate neighbors
-        if (distance == 2) return 2; // Second ring
-        return 3 + distance; // Everything else
+        if (distance == 0) return 0;
+        if (distance == 1) return 1;
+        if (distance == 2) return 2;
+        return 3 + distance;
     }
     
     private void ProcessGenerationQueue()
@@ -327,7 +314,15 @@ public class InfiniteChunkManager : MonoBehaviour
                 
                 currentlyGenerating.Add(chunkHash);
                 
-                GenerateChunkImmediate(task.chunkCoord);
+                if (asyncGeneration)
+                {
+                    // Start async generation (simplified for now)
+                    GenerateChunkImmediate(task.chunkCoord);
+                }
+                else
+                {
+                    GenerateChunkImmediate(task.chunkCoord);
+                }
                 
                 currentlyGenerating.Remove(chunkHash);
                 chunksProcessed++;
@@ -339,16 +334,16 @@ public class InfiniteChunkManager : MonoBehaviour
     {
         if (chunksNeedingBoundaryUpdate.Count == 0) return;
         
-        int maxUpdates = Mathf.Min(2, chunksNeedingBoundaryUpdate.Count);
-        List<int> toProcess = new List<int>();
+        int maxUpdates = Mathf.Min(3, chunksNeedingBoundaryUpdate.Count);
+        boundaryUpdateBuffer.Clear();
         
         foreach (var chunkHash in chunksNeedingBoundaryUpdate)
         {
-            toProcess.Add(chunkHash);
-            if (toProcess.Count >= maxUpdates) break;
+            boundaryUpdateBuffer.Add(chunkHash);
+            if (boundaryUpdateBuffer.Count >= maxUpdates) break;
         }
         
-        foreach (var chunkHash in toProcess)
+        foreach (var chunkHash in boundaryUpdateBuffer)
         {
             chunksNeedingBoundaryUpdate.Remove(chunkHash);
             if (loadedChunks.TryGetValue(chunkHash, out DungeonChunk chunk))
@@ -523,8 +518,7 @@ public class InfiniteChunkManager : MonoBehaviour
     {
         return coord.x * HASH_PRIME_X ^ coord.y * HASH_PRIME_Y ^ coord.z * HASH_PRIME_Z;
     }
-    
-    private void InitializeObjectPool()
+private void InitializeObjectPool()
     {
         if (chunkPrefab == null)
         {
@@ -532,8 +526,7 @@ public class InfiniteChunkManager : MonoBehaviour
             return;
         }
         
-        // Create more chunks for 16x16x16 (they're smaller, so we can have more)
-        for (int i = 0; i < 20; i++)
+        for (int i = 0; i < 15; i++)
         {
             DungeonChunk chunk = Instantiate(chunkPrefab);
             chunk.gameObject.SetActive(false);
