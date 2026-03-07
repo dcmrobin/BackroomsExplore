@@ -37,6 +37,7 @@ public class DungeonChunk : MonoBehaviour
     private float[,,] lightGrid;
     private Vector3Int chunkSize;
     private List<Vector3Int> lightPositions = new List<Vector3Int>();
+    private readonly HashSet<int> lightSourceIndexCache = new HashSet<int>();
     
     // Reference to the chunk manager for cross-chunk checks
     private InfiniteChunkManager chunkManager;
@@ -78,6 +79,11 @@ public class DungeonChunk : MonoBehaviour
         chunkCoord = coord;
         worldSeed = seed;
     }
+
+    public void SetChunkManager(InfiniteChunkManager manager)
+    {
+        chunkManager = manager;
+    }
     
     public Vector3Int GetChunkCoord() => chunkCoord;
     
@@ -92,12 +98,28 @@ public class DungeonChunk : MonoBehaviour
         voxelDataArray = new byte[voxelCount];
         voxelData.CopyTo(voxelDataArray);
         
-        // Place lights
-        PlaceLights();
-        
-        // Calculate lighting (optimized)
-        CalculateVoxelLightingOptimized();
-        
+        GenerateMeshFromCurrentData(recalculateLighting: true);
+    }
+
+    private void GenerateMeshFromCurrentData(bool recalculateLighting)
+    {
+        if (voxelDataArray == null || voxelDataArray.Length == 0)
+            return;
+
+        if (!recalculateLighting && (lightGridFlat == null || lightGridFlat.Length == 0 || lightGrid == null))
+        {
+            recalculateLighting = true;
+        }
+
+        if (recalculateLighting)
+        {
+            // Place lights
+            PlaceLights();
+
+            // Calculate lighting (optimized)
+            CalculateVoxelLightingOptimized();
+        }
+
         // Generate mesh with lighting data
         if (smoothLighting)
         {
@@ -165,6 +187,12 @@ public class DungeonChunk : MonoBehaviour
         if (lightPositions.Count == 0 && fallbackCeilingCount > 0)
         {
             lightPositions.Add(fallbackCeilingPosition);
+        }
+
+        lightSourceIndexCache.Clear();
+        foreach (var lightPos in lightPositions)
+        {
+            lightSourceIndexCache.Add(CoordToIndex(lightPos.x, lightPos.y, lightPos.z));
         }
     }
     
@@ -257,7 +285,8 @@ public class DungeonChunk : MonoBehaviour
                 nextLight[index] = currentLight[index];
                 return;
             }
-int yz = sizeY * sizeZ;
+
+            int yz = sizeY * sizeZ;
             int x = index / yz;
             int rem = index - (x * yz);
             int y = rem / sizeZ;
@@ -427,15 +456,7 @@ int yz = sizeY * sizeZ;
         Vector3 offset = new Vector3(x, y, z);
         
         // Check if this is a light source
-        bool isLightSource = false;
-        foreach (var lightPos in lightPositions)
-        {
-            if (lightPos.x == x && lightPos.y == y && lightPos.z == z)
-            {
-                isLightSource = true;
-                break;
-            }
-        }
+        bool isLightSource = lightSourceIndexCache.Contains(CoordToIndex(x, y, z));
         
         // LEFT FACE (Negative X)
         if (ShouldGenerateFace(x, y, z, Vector3Int.left))
@@ -504,20 +525,12 @@ int yz = sizeY * sizeZ;
         Vector3 offset = new Vector3(x, y, z);
         
         // Check if this is a light source
-        bool isLightSource = false;
-        foreach (var lightPos in lightPositions)
-        {
-            if (lightPos.x == x && lightPos.y == y && lightPos.z == z)
-            {
-                isLightSource = true;
-                break;
-            }
-        }
+        bool isLightSource = lightSourceIndexCache.Contains(CoordToIndex(x, y, z));
         
         byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
         
         // LEFT FACE (Negative X)
-if (ShouldGenerateFace(x, y, z, Vector3Int.left))
+        if (ShouldGenerateFace(x, y, z, Vector3Int.left))
         {
             float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 0), Vector3Int.left);
             float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 0), Vector3Int.left);
@@ -777,7 +790,7 @@ if (ShouldGenerateFace(x, y, z, Vector3Int.left))
         {
             width = Vector3.Distance(v0, v3);
             height = Vector3.Distance(v0, v1);
-meshData.uv.Add(new Vector2(0, 0));
+            meshData.uv.Add(new Vector2(0, 0));
             meshData.uv.Add(new Vector2(0, height * textureScale.y));
             meshData.uv.Add(new Vector2(width * textureScale.x, height * textureScale.y));
             meshData.uv.Add(new Vector2(width * textureScale.x, 0));
@@ -935,6 +948,7 @@ meshData.uv.Add(new Vector2(0, 0));
             
         lightGrid = null;
         lightPositions.Clear();
+        lightSourceIndexCache.Clear();
         voxelDataArray = null;
         lightGridFlat = null;
         vertexLightCache.Clear();
@@ -944,7 +958,7 @@ meshData.uv.Add(new Vector2(0, 0));
     {
         if (voxelData.IsCreated)
         {
-            GenerateMesh(voxelData);
+            GenerateMeshFromCurrentData(recalculateLighting: false);
         }
     }
     

@@ -410,6 +410,7 @@ public class InfiniteChunkManager : MonoBehaviour
             chunk.name = $"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}";
             
             chunk.SetChunkCoord(chunkCoord, worldSeed);
+            chunk.SetChunkManager(this);
             
             if (!chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
             {
