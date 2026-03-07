@@ -1,7 +1,9 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Unity.Collections;
+using Unity.Jobs;
+using Unity.Burst;
+using Unity.Mathematics;
 
 public class DungeonChunk : MonoBehaviour
 {
@@ -169,172 +171,199 @@ public class DungeonChunk : MonoBehaviour
     private void CalculateVoxelLightingOptimized()
     {
         int totalVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
-        
-        // Initialize light grid
-        for (int i = 0; i < totalVoxels; i++)
-        {
-            lightGridFlat[i] = 0f;
-        }
-        
-        // Set initial light values for light sources
+        var voxelNative = new NativeArray<byte>(voxelDataArray, Allocator.TempJob);
+        var currentLight = new NativeArray<float>(totalVoxels, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+        var nextLight = new NativeArray<float>(totalVoxels, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+        var lightSourceIndices = new NativeParallelHashSet<int>(math.max(1, lightPositions.Count), Allocator.TempJob);
+
         foreach (var lightPos in lightPositions)
         {
             int lightIndex = CoordToIndex(lightPos.x, lightPos.y, lightPos.z);
-            lightGridFlat[lightIndex] = lightSourceIntensity;
-            
-            // Light radiates from source into adjacent empty space
+            currentLight[lightIndex] = lightSourceIntensity;
+            lightSourceIndices.Add(lightIndex);
+
             foreach (var dir in CardinalDirections)
             {
                 Vector3Int neighbor = lightPos + dir;
                 if (IsInGrid(neighbor) && !GetVoxel(neighbor.x, neighbor.y, neighbor.z))
                 {
                     int neighborIndex = CoordToIndex(neighbor.x, neighbor.y, neighbor.z);
-                    lightGridFlat[neighborIndex] = Mathf.Max(lightGridFlat[neighborIndex], 
-                        lightSourceIntensity - lightDecay * 0.5f);
+                    currentLight[neighborIndex] = Mathf.Max(currentLight[neighborIndex], lightSourceIntensity - lightDecay * 0.5f);
                 }
             }
         }
-        
-        // Propagate light through empty space using optimized algorithm
-        float[] newLightGrid = new float[totalVoxels];
-        System.Array.Copy(lightGridFlat, newLightGrid, totalVoxels);
-        
+
         for (int step = 0; step < lightPropagationSteps; step++)
         {
-            // Parallel processing for performance
-            Parallel.For(0, totalVoxels, i =>
+            var propagateJob = new PropagateEmptyLightJob
             {
-                if (voxelDataArray[i] != 0) return; // Skip solid voxels
-                
-                Vector3Int coord = IndexToCoord(i);
-                float maxNeighborLight = 0f;
-                
-                // Check all 6 directions
-                if (coord.x > 0)
-                {
-                    int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
-                    if (voxelDataArray[leftIndex] == 0) // Empty voxel
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[leftIndex]);
-                }
-                
-                if (coord.x < chunkSize.x - 1)
-{
-                    int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
-                    if (voxelDataArray[rightIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[rightIndex]);
-                }
-                
-                if (coord.y > 0)
-                {
-                    int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
-                    if (voxelDataArray[downIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[downIndex]);
-                }
-                
-                if (coord.y < chunkSize.y - 1)
-                {
-                    int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
-                    if (voxelDataArray[upIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[upIndex]);
-                }
-                
-                if (coord.z > 0)
-                {
-                    int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
-                    if (voxelDataArray[backIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[backIndex]);
-                }
-                
-                if (coord.z < chunkSize.z - 1)
-                {
-                    int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
-                    if (voxelDataArray[forwardIndex] == 0)
-                        maxNeighborLight = Mathf.Max(maxNeighborLight, lightGridFlat[forwardIndex]);
-                }
-                
-                float propagatedLight = Mathf.Max(0, maxNeighborLight - lightDecay);
-                newLightGrid[i] = Mathf.Max(newLightGrid[i], propagatedLight);
-            });
-            
-            // Swap grids
-            float[] temp = lightGridFlat;
-            lightGridFlat = newLightGrid;
-            newLightGrid = temp;
+                voxelData = voxelNative,
+                currentLight = currentLight,
+                nextLight = nextLight,
+                sizeX = chunkSize.x,
+                sizeY = chunkSize.y,
+                sizeZ = chunkSize.z,
+                lightDecay = lightDecay
+            };
+
+            propagateJob.Schedule(totalVoxels, 64).Complete();
+            var temp = currentLight;
+            currentLight = nextLight;
+            nextLight = temp;
         }
-        
-        // Solid voxels receive light from adjacent empty voxels
-        Parallel.For(0, totalVoxels, i =>
+
+        var solidSource = new NativeArray<float>(currentLight, Allocator.TempJob);
+        var solidTarget = new NativeArray<float>(currentLight, Allocator.TempJob);
+
+        var solidJob = new UpdateSolidVoxelLightingJob
         {
-            if (voxelDataArray[i] == 0) return; // Skip empty voxels
-            
-            Vector3Int coord = IndexToCoord(i);
-            
-            // Check if this is a light source
-            bool isLightSource = false;
-            foreach (var lightPos in lightPositions)
+            voxelData = voxelNative,
+            sourceLightGrid = solidSource,
+            targetLightGrid = solidTarget,
+            lightSources = lightSourceIndices,
+            sizeX = chunkSize.x,
+            sizeY = chunkSize.y,
+            sizeZ = chunkSize.z,
+            lightSourceIntensity = lightSourceIntensity
+        };
+        solidJob.Schedule(totalVoxels, 64).Complete();
+
+        solidTarget.CopyTo(lightGridFlat);
+        solidTarget.Dispose();
+        solidSource.Dispose();
+        lightSourceIndices.Dispose();
+        nextLight.Dispose();
+        currentLight.Dispose();
+        voxelNative.Dispose();
+
+        ConvertFromFlatArray();
+    }
+
+    [BurstCompile]
+    private struct PropagateEmptyLightJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<byte> voxelData;
+        [ReadOnly] public NativeArray<float> currentLight;
+        public NativeArray<float> nextLight;
+        public int sizeX;
+        public int sizeY;
+        public int sizeZ;
+        public float lightDecay;
+
+        public void Execute(int index)
+        {
+            if (voxelData[index] != 0)
             {
-                if (lightPos.x == coord.x && lightPos.y == coord.y && lightPos.z == coord.z)
-                {
-                    isLightSource = true;
-                    break;
-                }
-            }
-            
-            if (isLightSource)
-            {
-                lightGridFlat[i] = lightSourceIntensity;
+                nextLight[index] = currentLight[index];
                 return;
             }
-            
-            float maxAdjacentLight = 0f;
-            
-            if (coord.x > 0)
+int yz = sizeY * sizeZ;
+            int x = index / yz;
+            int rem = index - (x * yz);
+            int y = rem / sizeZ;
+            int z = rem - (y * sizeZ);
+
+            float maxNeighborLight = 0f;
+
+            if (x > 0)
             {
-                int leftIndex = CoordToIndex(coord.x - 1, coord.y, coord.z);
-                if (voxelDataArray[leftIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[leftIndex]);
+                int left = index - yz;
+                if (voxelData[left] == 0) maxNeighborLight = math.max(maxNeighborLight, currentLight[left]);
             }
-            
-            if (coord.x < chunkSize.x - 1)
+            if (x < sizeX - 1)
             {
-                int rightIndex = CoordToIndex(coord.x + 1, coord.y, coord.z);
-                if (voxelDataArray[rightIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[rightIndex]);
+                int right = index + yz;
+                if (voxelData[right] == 0) maxNeighborLight = math.max(maxNeighborLight, currentLight[right]);
             }
-            
-            if (coord.y > 0)
+            if (y > 0)
             {
-                int downIndex = CoordToIndex(coord.x, coord.y - 1, coord.z);
-                if (voxelDataArray[downIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[downIndex]);
+                int down = index - sizeZ;
+                if (voxelData[down] == 0) maxNeighborLight = math.max(maxNeighborLight, currentLight[down]);
             }
-            
-            if (coord.y < chunkSize.y - 1)
+            if (y < sizeY - 1)
             {
-                int upIndex = CoordToIndex(coord.x, coord.y + 1, coord.z);
-                if (voxelDataArray[upIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[upIndex]);
+                int up = index + sizeZ;
+                if (voxelData[up] == 0) maxNeighborLight = math.max(maxNeighborLight, currentLight[up]);
             }
-            
-            if (coord.z > 0)
+            if (z > 0)
             {
-                int backIndex = CoordToIndex(coord.x, coord.y, coord.z - 1);
-                if (voxelDataArray[backIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[backIndex]);
+                int back = index - 1;
+                if (voxelData[back] == 0) maxNeighborLight = math.max(maxNeighborLight, currentLight[back]);
             }
-            
-            if (coord.z < chunkSize.z - 1)
+            if (z < sizeZ - 1)
             {
-                int forwardIndex = CoordToIndex(coord.x, coord.y, coord.z + 1);
-                if (voxelDataArray[forwardIndex] == 0)
-                    maxAdjacentLight = Mathf.Max(maxAdjacentLight, lightGridFlat[forwardIndex]);
+                int forward = index + 1;
+                if (voxelData[forward] == 0) maxNeighborLight = math.max(maxNeighborLight, currentLight[forward]);
             }
-            
-            lightGridFlat[i] = Mathf.Max(lightGridFlat[i], maxAdjacentLight * 0.7f);
-        });
-        
-        // Convert back to 3D array
-        ConvertFromFlatArray();
+
+            float propagatedLight = math.max(0f, maxNeighborLight - lightDecay);
+            nextLight[index] = math.max(currentLight[index], propagatedLight);
+        }
+    }
+
+    [BurstCompile]
+    private struct UpdateSolidVoxelLightingJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<byte> voxelData;
+        [ReadOnly] public NativeArray<float> sourceLightGrid;
+        public NativeArray<float> targetLightGrid;
+        [ReadOnly] public NativeParallelHashSet<int> lightSources;
+        public int sizeX;
+        public int sizeY;
+        public int sizeZ;
+        public float lightSourceIntensity;
+
+        public void Execute(int index)
+        {
+            if (voxelData[index] == 0) return;
+
+            if (lightSources.Contains(index))
+            {
+                targetLightGrid[index] = lightSourceIntensity;
+                return;
+            }
+
+            int yz = sizeY * sizeZ;
+            int x = index / yz;
+            int rem = index - (x * yz);
+            int y = rem / sizeZ;
+            int z = rem - (y * sizeZ);
+
+            float maxAdjacent = 0f;
+
+            if (x > 0)
+            {
+                int left = index - yz;
+                if (voxelData[left] == 0) maxAdjacent = math.max(maxAdjacent, sourceLightGrid[left]);
+            }
+            if (x < sizeX - 1)
+            {
+                int right = index + yz;
+                if (voxelData[right] == 0) maxAdjacent = math.max(maxAdjacent, sourceLightGrid[right]);
+            }
+            if (y > 0)
+            {
+                int down = index - sizeZ;
+                if (voxelData[down] == 0) maxAdjacent = math.max(maxAdjacent, sourceLightGrid[down]);
+            }
+            if (y < sizeY - 1)
+            {
+                int up = index + sizeZ;
+                if (voxelData[up] == 0) maxAdjacent = math.max(maxAdjacent, sourceLightGrid[up]);
+            }
+            if (z > 0)
+            {
+                int back = index - 1;
+                if (voxelData[back] == 0) maxAdjacent = math.max(maxAdjacent, sourceLightGrid[back]);
+            }
+            if (z < sizeZ - 1)
+            {
+                int forward = index + 1;
+                if (voxelData[forward] == 0) maxAdjacent = math.max(maxAdjacent, sourceLightGrid[forward]);
+            }
+
+            targetLightGrid[index] = math.max(sourceLightGrid[index], maxAdjacent * 0.7f);
+        }
     }
     
     // NEW: Generate mesh with flat lighting (all vertices of a face have same light)
@@ -437,7 +466,8 @@ public class DungeonChunk : MonoBehaviour
                 new Vector3(0,0,1), new Vector3(1,0,1), new Vector3(1,0,0), new Vector3(0,0,0),
                 meshData, materialID, true, faceLight, faceLight, faceLight, faceLight);
         }
-// TOP FACE (Positive Y) - CEILING
+        
+        // TOP FACE (Positive Y) - CEILING
         if (ShouldGenerateFace(x, y, z, Vector3Int.up))
         {
             byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_CEILING;
@@ -487,7 +517,7 @@ public class DungeonChunk : MonoBehaviour
         byte materialID = isLightSource ? MATERIAL_LIGHT : MATERIAL_WALL;
         
         // LEFT FACE (Negative X)
-        if (ShouldGenerateFace(x, y, z, Vector3Int.left))
+if (ShouldGenerateFace(x, y, z, Vector3Int.left))
         {
             float v0Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 0, 0), Vector3Int.left);
             float v1Light = GetVertexLightLevel(new Vector3Int(x, y, z) + new Vector3Int(0, 1, 0), Vector3Int.left);
@@ -657,7 +687,7 @@ public class DungeonChunk : MonoBehaviour
         // Adjust chunk coordinate and local position based on direction
         if (direction.x == -1 && x == 0) // Left boundary
         {
-adjacentChunkCoord += Vector3Int.left;
+            adjacentChunkCoord += Vector3Int.left;
             localPosInAdjacentChunk.x = chunkSize.x - 1;
         }
         else if (direction.x == 1 && x == chunkSize.x - 1) // Right boundary
@@ -747,7 +777,7 @@ adjacentChunkCoord += Vector3Int.left;
         {
             width = Vector3.Distance(v0, v3);
             height = Vector3.Distance(v0, v1);
-            meshData.uv.Add(new Vector2(0, 0));
+meshData.uv.Add(new Vector2(0, 0));
             meshData.uv.Add(new Vector2(0, height * textureScale.y));
             meshData.uv.Add(new Vector2(width * textureScale.x, height * textureScale.y));
             meshData.uv.Add(new Vector2(width * textureScale.x, 0));

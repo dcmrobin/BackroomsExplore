@@ -7,6 +7,13 @@ using Unity.Burst;
 
 public class InfiniteChunkManager : MonoBehaviour
 {
+    private static readonly Vector3Int[] CardinalDirections =
+    {
+        Vector3Int.right, Vector3Int.left,
+        Vector3Int.up, Vector3Int.down,
+        Vector3Int.forward, Vector3Int.back
+    };
+
     [Header("Chunk Settings")]
     public Vector3Int chunkSize = new Vector3Int(80, 40, 80);
     [SerializeField] private int renderDistance = 3;
@@ -218,7 +225,7 @@ public class InfiniteChunkManager : MonoBehaviour
             
             if (movedDistance > 2)
             {
-roomGenerator.PruneDistantData(currentPlayerChunkCoord);
+                roomGenerator.PruneDistantData(currentPlayerChunkCoord);
             }
         }
         
@@ -269,16 +276,41 @@ roomGenerator.PruneDistantData(currentPlayerChunkCoord);
         }
         
         chunksToUnloadBuffer.Clear();
-        foreach (var kvp in loadedChunks)
+        if (loadedChunks.Count > 0)
         {
-            Vector3Int chunkWorldPos = Vector3Int.FloorToInt(kvp.Value.GetChunkWorldPosition());
-            Vector3Int chunkCoord = WorldToChunkCoord(chunkWorldPos);
-            int distance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
-            
-            if (distance > renderDistance)
+            NativeArray<int> loadedHashes = new NativeArray<int>(loadedChunks.Count, Allocator.TempJob);
+            NativeArray<int3> loadedCoords = new NativeArray<int3>(loadedChunks.Count, Allocator.TempJob);
+            NativeArray<byte> unloadFlags = new NativeArray<byte>(loadedChunks.Count, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+
+            int i = 0;
+            foreach (var kvp in loadedChunks)
             {
-                chunksToUnloadBuffer.Add(kvp.Key);
+                loadedHashes[i] = kvp.Key;
+                Vector3Int coord = kvp.Value.GetChunkCoord();
+                loadedCoords[i] = new int3(coord.x, coord.y, coord.z);
+                i++;
             }
+
+            var unloadJob = new CalculateUnloadFlagsJob
+            {
+                loadedCoords = loadedCoords,
+                unloadFlags = unloadFlags,
+                playerCoord = new int3(currentPlayerChunkCoord.x, currentPlayerChunkCoord.y, currentPlayerChunkCoord.z),
+                renderDistance = renderDistance
+            };
+            unloadJob.Schedule(loadedCoords.Length, 64).Complete();
+
+            for (int idx = 0; idx < loadedHashes.Length; idx++)
+            {
+                if (unloadFlags[idx] != 0)
+                {
+                    chunksToUnloadBuffer.Add(loadedHashes[idx]);
+                }
+            }
+
+            unloadFlags.Dispose();
+            loadedCoords.Dispose();
+            loadedHashes.Dispose();
         }
         
         foreach (var chunkHash in chunksToUnloadBuffer)
@@ -403,13 +435,7 @@ roomGenerator.PruneDistantData(currentPlayerChunkCoord);
     
     private void MarkAdjacentChunksForUpdate(Vector3Int newChunkCoord)
     {
-        Vector3Int[] directions = {
-            Vector3Int.right, Vector3Int.left,
-            Vector3Int.up, Vector3Int.down,
-            Vector3Int.forward, Vector3Int.back
-        };
-        
-        foreach (var dir in directions)
+        foreach (var dir in CardinalDirections)
         {
             Vector3Int adjacentCoord = newChunkCoord + dir;
             int adjacentHash = HashCoordinate(adjacentCoord);
@@ -496,13 +522,7 @@ roomGenerator.PruneDistantData(currentPlayerChunkCoord);
     
     private void UpdateAdjacentChunks(Vector3Int unloadedChunkCoord)
     {
-        Vector3Int[] directions = {
-            Vector3Int.right, Vector3Int.left,
-            Vector3Int.up, Vector3Int.down,
-            Vector3Int.forward, Vector3Int.back
-        };
-        
-        foreach (var dir in directions)
+        foreach (var dir in CardinalDirections)
         {
             Vector3Int adjacentCoord = unloadedChunkCoord + dir;
             int adjacentHash = HashCoordinate(adjacentCoord);
@@ -518,7 +538,27 @@ roomGenerator.PruneDistantData(currentPlayerChunkCoord);
     {
         return coord.x * HASH_PRIME_X ^ coord.y * HASH_PRIME_Y ^ coord.z * HASH_PRIME_Z;
     }
-private void InitializeObjectPool()
+
+    [BurstCompile]
+    private struct CalculateUnloadFlagsJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<int3> loadedCoords;
+        public NativeArray<byte> unloadFlags;
+        public int3 playerCoord;
+        public int renderDistance;
+
+        public void Execute(int index)
+        {
+            int3 coord = loadedCoords[index];
+            int dx = math.abs(coord.x - playerCoord.x);
+            int dy = math.abs(coord.y - playerCoord.y);
+            int dz = math.abs(coord.z - playerCoord.z);
+            int distance = math.max(dx, math.max(dy, dz));
+            unloadFlags[index] = (byte)(distance > renderDistance ? 1 : 0);
+        }
+    }
+    
+    private void InitializeObjectPool()
     {
         if (chunkPrefab == null)
         {

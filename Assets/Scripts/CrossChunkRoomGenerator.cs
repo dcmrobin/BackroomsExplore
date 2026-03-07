@@ -2,6 +2,10 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
+using Unity.Burst;
+using Unity.Mathematics;
 
 public class CrossChunkRoomGenerator : MonoBehaviour
 {
@@ -654,17 +658,26 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         int startZ = Mathf.Max(localMin.z, 0);
         int endZ = Mathf.Min(localMax.z, chunkSize.z - 1);
         
-        for (int x = startX; x <= endX; x++)
+        int3 chunk = new int3(chunkSize.x, chunkSize.y, chunkSize.z);
+        int3 min = new int3(startX, startY, startZ);
+        int3 max = new int3(endX, endY, endZ);
+        int xCount = max.x - min.x + 1;
+        int yCount = max.y - min.y + 1;
+        int zCount = max.z - min.z + 1;
+
+        if (xCount <= 0 || yCount <= 0 || zCount <= 0)
+            return;
+
+        int total = xCount * yCount * zCount;
+        var carveRoomJob = new CarveRoomSolidJob
         {
-            for (int y = startY; y <= endY; y++)
-            {
-                for (int z = startZ; z <= endZ; z++)
-                {
-                    int index = x * (chunkSize.y * chunkSize.z) + y * chunkSize.z + z;
-                    grid[index] = 1; // Set to solid
-                }
-            }
-        }
+            grid = grid,
+            chunkSize = chunk,
+            min = min,
+            yCount = yCount,
+            zCount = zCount
+        };
+        carveRoomJob.Schedule(total, 64).Complete();
     }
     
     private void CarveGeometricCorridorIntoGrid(Corridor corridor, Vector3Int worldOffset, Vector3Int chunkSize, ref NativeArray<byte> grid)
@@ -797,11 +810,45 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         }
         else
         {
-            // Clear existing grid
-            for (int i = 0; i < voxelCount; i++)
-            {
-                grid[i] = 0;
-            }
+            var clearJob = new ClearByteGridJob { grid = grid };
+            clearJob.Schedule(voxelCount, 128).Complete();
+        }
+    }
+
+    [BurstCompile]
+    private struct ClearByteGridJob : IJobParallelFor
+    {
+        public NativeArray<byte> grid;
+
+        public void Execute(int index)
+        {
+            grid[index] = 0;
+        }
+    }
+
+    [BurstCompile]
+    private struct CarveRoomSolidJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction]
+        public NativeArray<byte> grid;
+        [ReadOnly] public int3 chunkSize;
+        [ReadOnly] public int3 min;
+        [ReadOnly] public int yCount;
+        [ReadOnly] public int zCount;
+
+        public void Execute(int index)
+        {
+            int xOffset = index / (yCount * zCount);
+            int rem = index - xOffset * yCount * zCount;
+            int yOffset = rem / zCount;
+            int zOffset = rem - yOffset * zCount;
+
+            int x = min.x + xOffset;
+            int y = min.y + yOffset;
+            int z = min.z + zOffset;
+
+            int gridIndex = x * (chunkSize.y * chunkSize.z) + y * chunkSize.z + z;
+            grid[gridIndex] = 1;
         }
     }
     
@@ -932,4 +979,4 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             processedChunks.Remove(chunkCoord);
         }
     }
-}
+}//
