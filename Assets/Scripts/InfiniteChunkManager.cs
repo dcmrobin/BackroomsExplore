@@ -23,8 +23,8 @@ public class InfiniteChunkManager : MonoBehaviour
 
     [Header("Generation Settings")]
     // How many finished chunks to upload to the GPU per frame.
-    // Keep this at 1-2 to avoid main-thread stalls during upload.
-    [SerializeField] private int maxMeshUploadsPerFrame = 2;
+    // 1 is recommended — each upload still costs a few ms even with the fast API.
+    [SerializeField] private int maxMeshUploadsPerFrame = 1;
     // Max simultaneous background generation threads.
     [SerializeField] private int maxConcurrentGenerations = 4;
     [SerializeField] private bool cancelDistantGeneration = true;
@@ -51,8 +51,12 @@ public class InfiniteChunkManager : MonoBehaviour
     private HashSet<Vector3Int>                currentlyGenerating = new HashSet<Vector3Int>();
 
     // Background threads push finished results here; main thread drains each frame
-    private readonly Queue<ChunkBuildResult> readyToUpload = new Queue<ChunkBuildResult>();
-    private readonly object                  uploadLock    = new object();
+    private readonly Queue<ChunkBuildResult> readyToUpload         = new Queue<ChunkBuildResult>();
+    private readonly Queue<ChunkBuildResult> readyToUploadBoundary = new Queue<ChunkBuildResult>();
+    private readonly object                  uploadLock            = new object();
+
+    // Tracks chunks currently being rebuilt as boundary updates (separate from fresh generation)
+    private HashSet<Vector3Int> currentlyRebuildingBoundary = new HashSet<Vector3Int>();
 
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
     private Vector3Int lastPlayerChunkCoord    = Vector3Int.zero;
@@ -181,6 +185,7 @@ public class InfiniteChunkManager : MonoBehaviour
 
         // Coroutine uploads completed chunks to GPU, spreading work across frames
         StartCoroutine(UploadReadyChunks());
+        StartCoroutine(UploadBoundaryRebuildResults());
     }
 
     void OnDestroy()
@@ -196,6 +201,8 @@ public class InfiniteChunkManager : MonoBehaviour
                 var r = readyToUpload.Dequeue();
                 if (r.voxelData.IsCreated) r.voxelData.Dispose();
             }
+            while (readyToUploadBoundary.Count > 0)
+                readyToUploadBoundary.Dequeue(); // voxelData owned by cache, don't dispose
         }
     }
 
@@ -417,28 +424,92 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
 
+    // Separate coroutine for boundary mesh uploads — keeps them out of the
+    // main generation upload budget so fresh chunks aren't starved.
+    private IEnumerator UploadBoundaryRebuildResults()
+    {
+        while (true)
+        {
+            int uploaded = 0;
+            while (uploaded < maxMeshUploadsPerFrame)
+            {
+                ChunkBuildResult result = null;
+                lock (uploadLock)
+                {
+                    if (readyToUploadBoundary.Count > 0)
+                        result = readyToUploadBoundary.Dequeue();
+                }
+                if (result == null) break;
+
+                currentlyRebuildingBoundary.Remove(result.chunkCoord);
+
+                if (result.success && result.meshData != null
+                    && loadedChunks.ContainsKey(result.chunkCoord))
+                {
+                    result.chunk.UploadMesh(result.meshData);
+                }
+                uploaded++;
+            }
+            yield return null;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Boundary updates
     // -------------------------------------------------------------------------
 
     private void ProcessBoundaryUpdates()
     {
+        // Dispatch boundary rebuild tasks to background threads.
+        // Completed results are uploaded by UploadBoundaryRebuildResults coroutine.
         if (chunksNeedingBoundaryUpdate.Count == 0) return;
 
-        int max = Mathf.Min(2, chunksNeedingBoundaryUpdate.Count);
+        const int maxDispatchPerFrame = 2;
         boundaryUpdateBuffer.Clear();
 
         foreach (var coord in chunksNeedingBoundaryUpdate)
         {
+            if (currentlyRebuildingBoundary.Contains(coord)) continue;
             boundaryUpdateBuffer.Add(coord);
-            if (boundaryUpdateBuffer.Count >= max) break;
+            if (boundaryUpdateBuffer.Count >= maxDispatchPerFrame) break;
         }
 
         foreach (var coord in boundaryUpdateBuffer)
         {
             chunksNeedingBoundaryUpdate.Remove(coord);
-            if (loadedChunks.TryGetValue(coord, out DungeonChunk c))
-                c.UpdateBoundaryMeshes();
+
+            if (!loadedChunks.TryGetValue(coord, out DungeonChunk chunk)) continue;
+            if (!chunkVoxelCache.TryGetValue(coord, out NativeArray<byte> voxelData)) continue;
+
+            currentlyRebuildingBoundary.Add(coord);
+
+            Vector3Int capturedCoord      = coord;
+            DungeonChunk capturedChunk    = chunk;
+            NativeArray<byte> capturedVox = voxelData;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                var result = new ChunkBuildResult
+                {
+                    chunkCoord = capturedCoord,
+                    chunk      = capturedChunk,
+                    voxelData  = capturedVox, // reference only — owned by chunkVoxelCache
+                    success    = false
+                };
+
+                try
+                {
+                    result.meshData = capturedChunk.BuildMeshData(capturedVox);
+                    result.success  = true;
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"[Thread] Boundary rebuild {capturedCoord} failed: {e.Message}");
+                }
+
+                lock (uploadLock)
+                    readyToUploadBoundary.Enqueue(result);
+            });
         }
     }
 

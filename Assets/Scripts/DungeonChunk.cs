@@ -109,7 +109,10 @@ public class DungeonChunk : MonoBehaviour
         return BuildMeshDataInternal(recalculateLighting: true);
     }
 
-    // Step 2 (main thread): push arrays to GPU and collider
+    // Step 2 (main thread): push arrays to GPU using the fast MeshDataArray API.
+    // This avoids the managed→native copy overhead of mesh.vertices = array[].
+    // Collider cooking is deferred one frame via StartCoroutine to avoid the
+    // synchronous physics bake stall on the main thread.
     public void UploadMesh(MeshData md)
     {
         if (md == null || md.vertices == null || md.vertices.Length == 0)
@@ -121,25 +124,93 @@ public class DungeonChunk : MonoBehaviour
 
         try
         {
+            // --- Fast path via Mesh.AllocateWritableMeshData ---
+            var meshDataArray = Mesh.AllocateWritableMeshData(1);
+            var meshData      = meshDataArray[0];
+
+            bool needsUInt32 = md.vertices.Length > 65535;
+
+            // Declare vertex buffer layout: Position, Normal, Color, TexCoord0
+            var vertexAttribs = new Unity.Collections.NativeArray<UnityEngine.Rendering.VertexAttributeDescriptor>(4, Allocator.Temp);
+            vertexAttribs[0] = new UnityEngine.Rendering.VertexAttributeDescriptor(
+                UnityEngine.Rendering.VertexAttribute.Position,  UnityEngine.Rendering.VertexAttributeFormat.Float32, 3);
+            vertexAttribs[1] = new UnityEngine.Rendering.VertexAttributeDescriptor(
+                UnityEngine.Rendering.VertexAttribute.Normal,    UnityEngine.Rendering.VertexAttributeFormat.Float32, 3);
+            vertexAttribs[2] = new UnityEngine.Rendering.VertexAttributeDescriptor(
+                UnityEngine.Rendering.VertexAttribute.Color,     UnityEngine.Rendering.VertexAttributeFormat.Float32, 4);
+            vertexAttribs[3] = new UnityEngine.Rendering.VertexAttributeDescriptor(
+                UnityEngine.Rendering.VertexAttribute.TexCoord0, UnityEngine.Rendering.VertexAttributeFormat.Float32, 2);
+
+            meshData.SetVertexBufferParams(md.vertices.Length, vertexAttribs);
+            vertexAttribs.Dispose();
+
+            // Write interleaved vertex data
+            var verts = meshData.GetVertexData<VertexData>(0);
+            for (int i = 0; i < md.vertices.Length; i++)
+            {
+                verts[i] = new VertexData
+                {
+                    position = md.vertices[i],
+                    normal   = md.normals[i],
+                    color    = new Vector4(md.colors[i].r, md.colors[i].g, md.colors[i].b, md.colors[i].a),
+                    uv       = md.uv[i]
+                };
+            }
+
+            meshData.SetIndexBufferParams(md.triangles.Length,
+                needsUInt32 ? UnityEngine.Rendering.IndexFormat.UInt32
+                            : UnityEngine.Rendering.IndexFormat.UInt16);
+
+            if (needsUInt32)
+            {
+                var idx = meshData.GetIndexData<int>();
+                for (int i = 0; i < md.triangles.Length; i++) idx[i] = md.triangles[i];
+            }
+            else
+            {
+                var idx = meshData.GetIndexData<ushort>();
+                for (int i = 0; i < md.triangles.Length; i++) idx[i] = (ushort)md.triangles[i];
+            }
+
+            meshData.subMeshCount = 1;
+            meshData.SetSubMesh(0, new UnityEngine.Rendering.SubMeshDescriptor(0, md.triangles.Length));
+
             Mesh mesh = new Mesh();
-            if (md.vertices.Length > 65535)
-                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            if (needsUInt32) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
 
-            mesh.vertices  = md.vertices;
-            mesh.triangles = md.triangles;
-            mesh.uv        = md.uv;
-            mesh.colors    = md.colors;
-            mesh.normals   = md.normals;
+            Mesh.ApplyAndDisposeWritableMeshData(meshDataArray, mesh);
             mesh.RecalculateBounds();
-            // mesh.Optimize() intentionally removed — it's slow and hurts streaming perf
 
-            if (meshFilter   != null) meshFilter.mesh         = mesh;
-            if (meshCollider != null) meshCollider.sharedMesh = mesh;
+            if (meshFilter != null) meshFilter.mesh = mesh;
+
+            // Defer physics collider bake — cooking is expensive and not needed
+            // until the player is actually near the chunk.
+            if (meshCollider != null)
+                StartCoroutine(BakeColliderNextFrame(mesh));
         }
         catch (System.Exception e)
         {
             Debug.LogError($"[DungeonChunk] UploadMesh failed: {e.Message}");
         }
+    }
+
+    // Struct matching the vertex buffer layout declared above
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct VertexData
+    {
+        public Vector3 position;
+        public Vector3 normal;
+        public Vector4 color;
+        public Vector2 uv;
+    }
+
+    // Defers MeshCollider baking by one frame so the main thread stall is
+    // pushed outside the upload coroutine's budget.
+    private System.Collections.IEnumerator BakeColliderNextFrame(Mesh mesh)
+    {
+        yield return null; // wait one frame
+        if (meshCollider != null)
+            meshCollider.sharedMesh = mesh;
     }
 
     // -------------------------------------------------------------------------
