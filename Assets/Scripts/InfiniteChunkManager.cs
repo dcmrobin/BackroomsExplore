@@ -18,15 +18,17 @@ public class InfiniteChunkManager : MonoBehaviour
 
     [Header("Chunk Settings")]
     public Vector3Int chunkSize = new Vector3Int(80, 40, 80);
-    [SerializeField] private int renderDistance = 3;
+    // FIX: Reduced default from 3 to 2 — cuts loaded chunk count from 343 to 125,
+    // critical for the 991 MB shared VRAM budget on this APU.
+    [SerializeField] private int renderDistance = 2;
     [SerializeField] private bool useObjectPooling = true;
 
     [Header("Generation Settings")]
-    // How many finished chunks to upload to the GPU per frame.
-    // 1 is recommended — each upload still costs a few ms even with the fast API.
+    // 1 upload per frame is safest on low-end hardware
     [SerializeField] private int maxMeshUploadsPerFrame = 1;
-    // Max simultaneous background generation threads.
-    [SerializeField] private int maxConcurrentGenerations = 4;
+    // FIX: Reduced default from 4 to 2 — on a 4-core APU, 4 threads saturates
+    // all cores and starves Unity's own render/physics threads.
+    [SerializeField] private int maxConcurrentGenerations = 2;
     [SerializeField] private bool cancelDistantGeneration = true;
 
     [Header("Seed Settings")]
@@ -55,7 +57,7 @@ public class InfiniteChunkManager : MonoBehaviour
     private readonly Queue<ChunkBuildResult> readyToUploadBoundary = new Queue<ChunkBuildResult>();
     private readonly object                  uploadLock            = new object();
 
-    // Tracks chunks currently being rebuilt as boundary updates (separate from fresh generation)
+    // Tracks chunks currently being rebuilt as boundary updates
     private HashSet<Vector3Int> currentlyRebuildingBoundary = new HashSet<Vector3Int>();
 
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
@@ -183,7 +185,6 @@ public class InfiniteChunkManager : MonoBehaviour
         InitializeObjectPool();
         UpdateGenerationQueue();
 
-        // Coroutine uploads completed chunks to GPU, spreading work across frames
         StartCoroutine(UploadReadyChunks());
         StartCoroutine(UploadBoundaryRebuildResults());
     }
@@ -254,8 +255,8 @@ public class InfiniteChunkManager : MonoBehaviour
         for (int z = -renderDistance; z <= renderDistance; z++)
         {
             Vector3Int coord = currentPlayerChunkCoord + new Vector3Int(x, y, z);
-            if (loadedChunks.ContainsKey(coord))     continue;
-            if (currentlyGenerating.Contains(coord)) continue;
+            if (loadedChunks.ContainsKey(coord))      continue;
+            if (currentlyGenerating.Contains(coord))  continue;
             if (generationQueue.ContainsCoord(coord)) continue;
             int dist = GetChunkDistance(coord, currentPlayerChunkCoord);
             generationQueue.Enqueue(new ChunkGenerationTask
@@ -321,7 +322,6 @@ public class InfiniteChunkManager : MonoBehaviour
 
             currentlyGenerating.Add(task.chunkCoord);
 
-            // Allocate objects on main thread (Unity API)
             DungeonChunk chunk = GetChunkFromPool();
             if (chunk == null)
             {
@@ -341,11 +341,9 @@ public class InfiniteChunkManager : MonoBehaviour
             NativeArray<byte> voxelData = new NativeArray<byte>(
                 voxelCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 
-            // Capture loop variables for the closure
             Vector3Int capturedCoord = task.chunkCoord;
             Vector3Int capturedSize  = chunkSize;
 
-            // Hand off the heavy work to a thread pool thread
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 var result = new ChunkBuildResult
@@ -358,10 +356,7 @@ public class InfiniteChunkManager : MonoBehaviour
 
                 try
                 {
-                    // Step 1: voxel generation (room carving) — pure data, thread-safe
                     roomGenerator.GenerateForChunk(capturedCoord, capturedSize, ref voxelData);
-
-                    // Step 2: build mesh arrays — pure data, no Unity API
                     result.meshData = chunk.BuildMeshData(voxelData);
                     result.success  = true;
                 }
@@ -377,7 +372,7 @@ public class InfiniteChunkManager : MonoBehaviour
     }
 
     // -------------------------------------------------------------------------
-    // Upload coroutine — main thread only, spreads GPU uploads across frames
+    // Upload coroutines — main thread only, spreads GPU uploads across frames
     // -------------------------------------------------------------------------
 
     private IEnumerator UploadReadyChunks()
@@ -401,7 +396,7 @@ public class InfiniteChunkManager : MonoBehaviour
                 bool discard = !result.success
                     || result.meshData == null
                     || (cancelDistantGeneration && GetChunkDistance(result.chunkCoord, currentPlayerChunkCoord) > renderDistance)
-                    || chunkVoxelCache.ContainsKey(result.chunkCoord); // duplicate
+                    || chunkVoxelCache.ContainsKey(result.chunkCoord);
 
                 if (discard)
                 {
@@ -411,7 +406,6 @@ public class InfiniteChunkManager : MonoBehaviour
                     continue;
                 }
 
-                // Store voxel cache and upload mesh — both must happen on main thread
                 chunkVoxelCache[result.chunkCoord] = result.voxelData;
                 result.chunk.UploadMesh(result.meshData);
                 loadedChunks[result.chunkCoord] = result.chunk;
@@ -424,8 +418,8 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
 
-    // Separate coroutine for boundary mesh uploads — keeps them out of the
-    // main generation upload budget so fresh chunks aren't starved.
+    // Separate coroutine for boundary mesh uploads — keeps fresh chunk uploads
+    // from being starved by boundary rebuilds.
     private IEnumerator UploadBoundaryRebuildResults()
     {
         while (true)
@@ -460,8 +454,6 @@ public class InfiniteChunkManager : MonoBehaviour
 
     private void ProcessBoundaryUpdates()
     {
-        // Dispatch boundary rebuild tasks to background threads.
-        // Completed results are uploaded by UploadBoundaryRebuildResults coroutine.
         if (chunksNeedingBoundaryUpdate.Count == 0) return;
 
         const int maxDispatchPerFrame = 2;
@@ -493,7 +485,7 @@ public class InfiniteChunkManager : MonoBehaviour
                 {
                     chunkCoord = capturedCoord,
                     chunk      = capturedChunk,
-                    voxelData  = capturedVox, // reference only — owned by chunkVoxelCache
+                    voxelData  = capturedVox,
                     success    = false
                 };
 
