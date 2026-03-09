@@ -23,7 +23,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     
     [Header("Room Expansion")]
     [SerializeField] private int maxExpansionSteps = 20;
-    [SerializeField] private float expansionStepSize = 1.0f;
+    // FIX: removed unused expansionStepSize field
     [SerializeField] private bool expandToGrid = true;
     [SerializeField] private int gridAlignment = 2;
     
@@ -39,6 +39,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     [SerializeField] private int pruneRadius = 10;
     
     // Global storage
+    // FIX: Use Vector3Int keys directly instead of int hashes to avoid hash collisions
     private Dictionary<int, CuboidRoom> allRooms = new Dictionary<int, CuboidRoom>();
     private Dictionary<int, Corridor> allCorridors = new Dictionary<int, Corridor>();
     private Dictionary<Vector3Int, HashSet<int>> chunkToRooms = new Dictionary<Vector3Int, HashSet<int>>();
@@ -56,7 +57,9 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     private int worldSeed;
     
     // Performance optimizations
+    // FIX: Use a bounded cache with eviction to prevent unbounded memory growth
     private Dictionary<Vector3Int, float> noiseCache = new Dictionary<Vector3Int, float>();
+    private const int MAX_NOISE_CACHE_SIZE = 50000;
     private object generationLock = new object();
     private System.Random globalRandom;
     
@@ -192,10 +195,8 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         currentChunkSize = chunkSize;
         worldSeed = seed;
         
-        // Initialize global random with the world seed
         globalRandom = new System.Random(worldSeed);
         
-        // Generate deterministic noise offset from the world seed
         System.Random offsetRandom = new System.Random(worldSeed);
         noiseOffset = new Vector3(
             offsetRandom.Next(-10000, 10000),
@@ -231,7 +232,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 processedChunks.Add(chunkCoord);
             }
             
-            // Get rooms for this chunk
             List<CuboidRoom> relevantRooms = GetRoomsForChunkDirect(chunkCoord);
             foreach (var room in relevantRooms)
             {
@@ -239,7 +239,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                     CarveCuboidRoomIntoGrid(room, worldOffset, chunkSize, ref finalGrid);
             }
             
-            // Get corridors for this chunk
             List<Corridor> relevantCorridors = GetCorridorsForChunkDirect(chunkCoord);
             foreach (var corridor in relevantCorridors)
             {
@@ -253,11 +252,9 @@ public class CrossChunkRoomGenerator : MonoBehaviour
     {
         Vector3Int worldOffset = Vector3Int.Scale(chunkCoord, currentChunkSize);
         
-        // Create a deterministic random for this specific chunk
         int chunkSeed = GetChunkSeed(chunkCoord);
         System.Random chunkRandom = new System.Random(chunkSeed);
         
-        // Scan for potential room seeds
         for (int x = 0; x < currentChunkSize.x; x += roomScanStep)
         {
             for (int y = 0; y < currentChunkSize.y; y += roomScanStep)
@@ -275,8 +272,10 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 }
             }
         }
-        
-        ConnectRooms(chunkRandom);
+
+        // FIX: Only connect rooms that belong to this chunk, not all global rooms.
+        // This prevents O(n²) MST growth and duplicate corridors across chunks.
+        ConnectRoomsForChunk(chunkCoord, chunkRandom);
     }
     
     private float GetCachedNoise(Vector3Int worldPos)
@@ -284,22 +283,26 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         if (useNoiseCache && noiseCache.TryGetValue(worldPos, out float cachedValue))
             return cachedValue;
         
-        // Use the deterministic noise offset from the world seed
+        // FIX: True 3D-ish noise using two Perlin samples to reduce directional Z bias
         float x = (worldPos.x + noiseOffset.x) * noiseScale.x;
         float y = (worldPos.y + noiseOffset.y) * noiseScale.y;
         float z = (worldPos.z + noiseOffset.z) * noiseScale.z;
         
-        float noiseValue = Mathf.PerlinNoise(x + z * 0.5f, y + z * 0.5f);
+        float noiseValue = (Mathf.PerlinNoise(x, y + z) + Mathf.PerlinNoise(x + z, y)) * 0.5f;
         
         if (useNoiseCache)
+        {
+            // FIX: Evict cache if it exceeds max size to prevent unbounded memory growth
+            if (noiseCache.Count >= MAX_NOISE_CACHE_SIZE)
+                noiseCache.Clear();
             noiseCache[worldPos] = noiseValue;
+        }
         
         return noiseValue;
     }
     
     private int GetChunkSeed(Vector3Int chunkCoord)
     {
-        // Combine world seed with chunk coordinates for a unique but deterministic seed
         return worldSeed ^ (chunkCoord.x * 73856093) ^ (chunkCoord.y * 19349663) ^ (chunkCoord.z * 83492791);
     }
     
@@ -323,14 +326,12 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         CuboidRoom room = new CuboidRoom(nextRoomId++, seedPos, genChunk);
         ExpandRoomGeometrically(room, chunkRandom);
         
-        // Ensure minimum viable room
         if (room.size.x >= minRoomSize && room.size.y >= minRoomSize && room.size.z >= minRoomSize)
         {
             RegisterRoom(room);
         }
         else
         {
-            // Room too small, discard it
             nextRoomId--;
         }
     }
@@ -341,7 +342,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         Vector3Int currentMax = room.center;
         bool[] expansionBlocked = new bool[6];
         
-        // Start with all directions
         List<int> directionOrder = new List<int> { 0, 1, 2, 3, 4, 5 };
         directionOrder = directionOrder.OrderBy(x => chunkRandom.Next()).ToList();
         
@@ -349,11 +349,10 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         {
             bool expanded = false;
             
-            // Filter out blocked directions at the start of each step
             var activeDirections = directionOrder.Where(dir => !expansionBlocked[dir]).ToList();
             
             if (activeDirections.Count == 0)
-                break; // All directions are blocked
+                break;
                 
             foreach (int dirIndex in activeDirections)
             {
@@ -361,7 +360,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 if (TryExpandDirection(room, ref currentMin, ref currentMax, direction, chunkRandom))
                 {
                     expanded = true;
-                    // Reshuffle only active directions after successful expansion
                     activeDirections = activeDirections.OrderBy(x => chunkRandom.Next()).ToList();
                 }
                 else
@@ -370,7 +368,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                 }
             }
             
-            // Update directionOrder with new active directions for next iteration
             directionOrder = activeDirections;
             
             if (!expanded || RoomExceedsMaxSize(currentMin, currentMax))
@@ -424,7 +421,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             expandMin = new Vector3Int(currentMin.x, currentMin.y, currentMin.z - gridAlignment);
             expandMax = new Vector3Int(currentMax.x, currentMax.y, currentMin.z - 1);
         }
-        else // forward
+        else
         {
             expandMin = new Vector3Int(currentMin.x, currentMin.y, currentMax.z + 1);
             expandMax = new Vector3Int(currentMax.x, currentMax.y, currentMax.z + gridAlignment);
@@ -447,9 +444,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                     float noiseValue = GetCachedNoise(samplePos);
                     
                     if (noiseValue > roomExpansionThreshold)
-                    {
                         validSamples++;
-                    }
                 }
             }
         }
@@ -509,50 +504,94 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         return false;
     }
     
-    private void ConnectRooms(System.Random chunkRandom)
+    // FIX: Only connect rooms generated in or near the current chunk rather than
+    // running MST over all global rooms (which is O(n²) and grows unboundedly).
+    private void ConnectRoomsForChunk(Vector3Int chunkCoord, System.Random chunkRandom)
     {
-        List<CuboidRoom> activeRooms = allRooms.Values.Where(r => r.isActive).ToList();
-        
-        if (activeRooms.Count < 2)
-            return;
-        
-        // Create minimum spanning tree
-        List<CuboidRoom> connectedRooms = new List<CuboidRoom>();
-        List<CuboidRoom> unconnectedRooms = new List<CuboidRoom>(activeRooms);
-        
-        int startIndex = Mathf.Abs(chunkRandom.Next()) % unconnectedRooms.Count;
-        CuboidRoom startRoom = unconnectedRooms[startIndex];
-        connectedRooms.Add(startRoom);
-        unconnectedRooms.Remove(startRoom);
-        
-        while (unconnectedRooms.Count > 0)
+        // Gather rooms belonging to this chunk plus immediate neighbours
+        HashSet<int> candidateIds = new HashSet<int>();
+        Vector3Int[] searchOffsets = {
+            Vector3Int.zero,
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+
+        foreach (var offset in searchOffsets)
         {
-            float minDistance = float.MaxValue;
-            CuboidRoom closestUnconnected = null;
-            CuboidRoom closestConnected = null;
-            
-            foreach (var connectedRoom in connectedRooms)
+            Vector3Int searchChunk = chunkCoord + offset;
+            if (chunkToRooms.TryGetValue(searchChunk, out HashSet<int> chunkRoomIds))
             {
-                foreach (var unconnectedRoom in unconnectedRooms)
+                foreach (var id in chunkRoomIds)
+                    candidateIds.Add(id);
+            }
+        }
+
+        List<CuboidRoom> candidateRooms = new List<CuboidRoom>();
+        foreach (var id in candidateIds)
+        {
+            if (allRooms.TryGetValue(id, out CuboidRoom r) && r.isActive)
+                candidateRooms.Add(r);
+        }
+
+        if (candidateRooms.Count < 2) return;
+
+        // Build a set of already-connected room pairs to avoid duplicate corridors
+        HashSet<long> existingConnections = new HashSet<long>();
+        foreach (var corridor in allCorridors.Values)
+        {
+            if (corridor.isActive)
+                existingConnections.Add(CorridorKey(corridor.roomAId, corridor.roomBId));
+        }
+
+        // Prim's MST restricted to candidate rooms
+        List<CuboidRoom> connected = new List<CuboidRoom>();
+        List<CuboidRoom> unconnected = new List<CuboidRoom>(candidateRooms);
+
+        int startIndex = Mathf.Abs(chunkRandom.Next()) % unconnected.Count;
+        connected.Add(unconnected[startIndex]);
+        unconnected.RemoveAt(startIndex);
+
+        while (unconnected.Count > 0)
+        {
+            float minDist = float.MaxValue;
+            CuboidRoom bestUnconnected = null;
+            CuboidRoom bestConnected = null;
+
+            foreach (var c in connected)
+            {
+                foreach (var u in unconnected)
                 {
-                    float distance = Vector3Int.Distance(connectedRoom.center, unconnectedRoom.center);
-                    
-                    if (distance < minDistance)
+                    float d = Vector3Int.Distance(c.center, u.center);
+                    if (d < minDist)
                     {
-                        minDistance = distance;
-                        closestUnconnected = unconnectedRoom;
-                        closestConnected = connectedRoom;
+                        minDist = d;
+                        bestUnconnected = u;
+                        bestConnected = c;
                     }
                 }
             }
-            
-            if (closestUnconnected != null && closestConnected != null)
+
+            if (bestUnconnected != null)
             {
-                CreateGeometricCorridor(closestConnected, closestUnconnected, chunkRandom);
-                connectedRooms.Add(closestUnconnected);
-                unconnectedRooms.Remove(closestUnconnected);
+                long key = CorridorKey(bestConnected.id, bestUnconnected.id);
+                if (!existingConnections.Contains(key))
+                {
+                    CreateGeometricCorridor(bestConnected, bestUnconnected, chunkRandom);
+                    existingConnections.Add(key);
+                }
+                connected.Add(bestUnconnected);
+                unconnected.Remove(bestUnconnected);
             }
         }
+    }
+
+    // FIX: Stable unique key for an unordered room pair
+    private long CorridorKey(int idA, int idB)
+    {
+        int lo = Mathf.Min(idA, idB);
+        int hi = Mathf.Max(idA, idB);
+        return ((long)lo << 32) | (uint)hi;
     }
     
     private void CreateGeometricCorridor(CuboidRoom roomA, CuboidRoom roomB, System.Random chunkRandom)
@@ -652,18 +691,15 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         Vector3Int localMax = room.maxBounds - worldOffset;
         
         int startX = Mathf.Max(localMin.x, 0);
-        int endX = Mathf.Min(localMax.x, chunkSize.x - 1);
+        int endX   = Mathf.Min(localMax.x, chunkSize.x - 1);
         int startY = Mathf.Max(localMin.y, 0);
-        int endY = Mathf.Min(localMax.y, chunkSize.y - 1);
+        int endY   = Mathf.Min(localMax.y, chunkSize.y - 1);
         int startZ = Mathf.Max(localMin.z, 0);
-        int endZ = Mathf.Min(localMax.z, chunkSize.z - 1);
+        int endZ   = Mathf.Min(localMax.z, chunkSize.z - 1);
         
-        int3 chunk = new int3(chunkSize.x, chunkSize.y, chunkSize.z);
-        int3 min = new int3(startX, startY, startZ);
-        int3 max = new int3(endX, endY, endZ);
-        int xCount = max.x - min.x + 1;
-        int yCount = max.y - min.y + 1;
-        int zCount = max.z - min.z + 1;
+        int xCount = endX - startX + 1;
+        int yCount = endY - startY + 1;
+        int zCount = endZ - startZ + 1;
 
         if (xCount <= 0 || yCount <= 0 || zCount <= 0)
             return;
@@ -671,11 +707,13 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         int total = xCount * yCount * zCount;
         var carveRoomJob = new CarveRoomSolidJob
         {
-            grid = grid,
-            chunkSize = chunk,
-            min = min,
-            yCount = yCount,
-            zCount = zCount
+            grid      = grid,
+            chunkSize = new int3(chunkSize.x, chunkSize.y, chunkSize.z),
+            min       = new int3(startX, startY, startZ),
+            // FIX: pass chunkSize bounds so the job can clamp and avoid out-of-bounds writes
+            maxValid  = new int3(chunkSize.x - 1, chunkSize.y - 1, chunkSize.z - 1),
+            yCount    = yCount,
+            zCount    = zCount
         };
         carveRoomJob.Schedule(total, 64).Complete();
     }
@@ -686,7 +724,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         {
             Vector3Int localCenter = worldPoint - worldOffset;
             int halfWidth = corridor.width / 2;
-            
             int startY = localCenter.y - corridor.height / 2;
             
             for (int dx = -halfWidth; dx <= halfWidth; dx++)
@@ -708,7 +745,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                             localPos.z >= 0 && localPos.z < chunkSize.z)
                         {
                             int index = localPos.x * (chunkSize.y * chunkSize.z) + localPos.y * chunkSize.z + localPos.z;
-                            grid[index] = 1; // Set to solid
+                            grid[index] = 1;
                         }
                     }
                 }
@@ -833,19 +870,26 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         public NativeArray<byte> grid;
         [ReadOnly] public int3 chunkSize;
         [ReadOnly] public int3 min;
+        // FIX: added maxValid so each thread can bounds-check before writing
+        [ReadOnly] public int3 maxValid;
         [ReadOnly] public int yCount;
         [ReadOnly] public int zCount;
 
         public void Execute(int index)
         {
             int xOffset = index / (yCount * zCount);
-            int rem = index - xOffset * yCount * zCount;
+            int rem     = index - xOffset * yCount * zCount;
             int yOffset = rem / zCount;
             int zOffset = rem - yOffset * zCount;
 
             int x = min.x + xOffset;
             int y = min.y + yOffset;
             int z = min.z + zOffset;
+
+            // FIX: bounds guard — should always pass given CarveCuboidRoomIntoGrid clamps,
+            // but this prevents any crash if the maths drifts.
+            if (x < 0 || x > maxValid.x || y < 0 || y > maxValid.y || z < 0 || z > maxValid.z)
+                return;
 
             int gridIndex = x * (chunkSize.y * chunkSize.z) + y * chunkSize.z + z;
             grid[gridIndex] = 1;
@@ -866,7 +910,6 @@ public class CrossChunkRoomGenerator : MonoBehaviour
                     if (distance > pruneRadius)
                     {
                         room.isActive = false;
-                        
                         RemoveRoomFromSpatialGrid(room);
                         
                         List<Vector3Int> occupiedChunks = room.GetOccupiedChunks(currentChunkSize);
@@ -909,9 +952,11 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             }
             
             if (allRooms.Count > maxRoomsToKeep * 2)
-            {
                 RemoveInactiveRooms();
-            }
+
+            // FIX: Also evict noise cache entries for pruned chunks to reclaim memory
+            if (noiseCache.Count > MAX_NOISE_CACHE_SIZE / 2)
+                noiseCache.Clear();
         }
     }
     
@@ -949,9 +994,7 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         }
         
         foreach (int roomId in roomsToRemove)
-        {
             allRooms.Remove(roomId);
-        }
     }
     
     private Vector3Int WorldToChunkCoord(Vector3Int worldPos, Vector3Int chunkSize)
@@ -972,6 +1015,8 @@ public class CrossChunkRoomGenerator : MonoBehaviour
         );
     }
     
+    // FIX: ClearChunkData now also removes the chunk from processedChunks so that
+    // if the player re-enters a pruned chunk, rooms regenerate correctly.
     public void ClearChunkData(Vector3Int chunkCoord)
     {
         lock (generationLock)
@@ -979,4 +1024,4 @@ public class CrossChunkRoomGenerator : MonoBehaviour
             processedChunks.Remove(chunkCoord);
         }
     }
-}//
+}

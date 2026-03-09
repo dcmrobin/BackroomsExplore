@@ -403,12 +403,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a846c99c3bf674c40ae13258884a40fd, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  chunkSize: {x: 16, y: 16, z: 16}
+  chunkSize: {x: 32, y: 32, z: 32}
   renderDistance: 3
   useObjectPooling: 1
-  maxChunksPerFrame: 1
+  maxMeshUploadsPerFrame: 2
+  maxConcurrentGenerations: 4
   cancelDistantGeneration: 1
-  asyncGeneration: 1
   worldSeed: 123456
   randomizeSeed: 1
   chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
@@ -444,13 +444,12 @@ MonoBehaviour:
   noiseScale: {x: 0.08, y: 0.08, z: 0.08}
   noiseOffset: {x: 0, y: 0, z: 0}
   useNoiseCache: 1
-  roomThreshold: 0.6
-  roomExpansionThreshold: 0.7
+  roomThreshold: 0.7
+  roomExpansionThreshold: 0.57
   minRoomSize: 7
-  maxRoomSize: 30
+  maxRoomSize: 40
   roomScanStep: 4
   maxExpansionSteps: 20
-  expansionStepSize: 1
   expandToGrid: 1
   gridAlignment: 2
   minCorridorWidth: 3

@@ -1,5 +1,7 @@
 using UnityEngine;
+using System.Collections;
 using System.Collections.Generic;
+using System.Threading;
 using Unity.Jobs;
 using Unity.Collections;
 using Unity.Mathematics;
@@ -18,462 +20,461 @@ public class InfiniteChunkManager : MonoBehaviour
     public Vector3Int chunkSize = new Vector3Int(80, 40, 80);
     [SerializeField] private int renderDistance = 3;
     [SerializeField] private bool useObjectPooling = true;
-    
+
     [Header("Generation Settings")]
-    [SerializeField] private int maxChunksPerFrame = 1;
+    // How many finished chunks to upload to the GPU per frame.
+    // Keep this at 1-2 to avoid main-thread stalls during upload.
+    [SerializeField] private int maxMeshUploadsPerFrame = 2;
+    // Max simultaneous background generation threads.
+    [SerializeField] private int maxConcurrentGenerations = 4;
     [SerializeField] private bool cancelDistantGeneration = true;
-    [SerializeField] private bool asyncGeneration = false;
-    
+
     [Header("Seed Settings")]
     [SerializeField] private int worldSeed = 123456;
     [SerializeField] private bool randomizeSeed = true;
-    
+
     [Header("References")]
     [SerializeField] private DungeonChunk chunkPrefab;
-    [SerializeField] private Transform playerTransform;
-    [SerializeField] private Material chunkMaterial;
-    
+    [SerializeField] private Transform    playerTransform;
+    [SerializeField] private Material     chunkMaterial;
+
     private CrossChunkRoomGenerator roomGenerator;
-    
-    // Chunk storage
-    private Dictionary<int, DungeonChunk> loadedChunks = new Dictionary<int, DungeonChunk>();
-    private Dictionary<int, NativeArray<byte>> chunkVoxelCache = new Dictionary<int, NativeArray<byte>>();
+
+    // All accessed only on main thread
+    private Dictionary<Vector3Int, DungeonChunk>      loadedChunks    = new Dictionary<Vector3Int, DungeonChunk>();
+    private Dictionary<Vector3Int, NativeArray<byte>> chunkVoxelCache = new Dictionary<Vector3Int, NativeArray<byte>>();
     private Queue<DungeonChunk> chunkPool = new Queue<DungeonChunk>();
     private Transform chunkContainer;
-    
-    // Generation queues with priorities
-    private PriorityQueue<ChunkGenerationTask> generationQueue = new PriorityQueue<ChunkGenerationTask>();
-    private HashSet<int> currentlyGenerating = new HashSet<int>();
-    
-    // State
+
+    // Generation pipeline
+    private PriorityQueue<ChunkGenerationTask> generationQueue     = new PriorityQueue<ChunkGenerationTask>();
+    private HashSet<Vector3Int>                currentlyGenerating = new HashSet<Vector3Int>();
+
+    // Background threads push finished results here; main thread drains each frame
+    private readonly Queue<ChunkBuildResult> readyToUpload = new Queue<ChunkBuildResult>();
+    private readonly object                  uploadLock    = new object();
+
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
-    private Vector3Int lastPlayerChunkCoord = Vector3Int.zero;
-    
-    // Track chunks that need boundary updates
-    private HashSet<int> chunksNeedingBoundaryUpdate = new HashSet<int>();
-    private readonly List<int> chunksToUnloadBuffer = new List<int>();
-    private readonly List<int> boundaryUpdateBuffer = new List<int>();
-    
-    // Coordinate hashing (faster than Vector3Int for dictionary keys)
-    private const int HASH_PRIME_X = 73856093;
-    private const int HASH_PRIME_Y = 19349663;
-    private const int HASH_PRIME_Z = 83492791;
-    
+    private Vector3Int lastPlayerChunkCoord    = Vector3Int.zero;
+
+    private HashSet<Vector3Int>       chunksNeedingBoundaryUpdate = new HashSet<Vector3Int>();
+    private readonly List<Vector3Int> chunksToUnloadBuffer        = new List<Vector3Int>();
+    private readonly List<Vector3Int> boundaryUpdateBuffer        = new List<Vector3Int>();
+
+    // -------------------------------------------------------------------------
+    // Inner types
+    // -------------------------------------------------------------------------
+
     private class ChunkGenerationTask : System.IComparable<ChunkGenerationTask>
     {
         public Vector3Int chunkCoord;
-        public int priority; // Lower number = higher priority
+        public int   priority;
         public float timestamp;
-        
+
         public int CompareTo(ChunkGenerationTask other)
         {
-            // Primary sort by priority, secondary by timestamp (FIFO for same priority)
-            int priorityCompare = priority.CompareTo(other.priority);
-            if (priorityCompare != 0)
-                return priorityCompare;
-            return timestamp.CompareTo(other.timestamp);
+            int pc = priority.CompareTo(other.priority);
+            return pc != 0 ? pc : timestamp.CompareTo(other.timestamp);
         }
     }
-    
+
+    // Everything computed off main thread; uploaded on main thread
+    public class ChunkBuildResult
+    {
+        public Vector3Int        chunkCoord;
+        public DungeonChunk      chunk;
+        public NativeArray<byte> voxelData;
+        public DungeonChunk.MeshData meshData;
+        public bool              success;
+    }
+
+    // -------------------------------------------------------------------------
+    // Priority queue
+    // -------------------------------------------------------------------------
+
     private class PriorityQueue<T> where T : System.IComparable<T>
     {
         private List<T> heap = new List<T>();
-        
+
         public void Enqueue(T item)
         {
             heap.Add(item);
             int i = heap.Count - 1;
             while (i > 0)
             {
-                int parent = (i - 1) / 2;
-                if (heap[i].CompareTo(heap[parent]) >= 0)
-                    break;
-                    
-                // Swap
-                T temp = heap[i];
-                heap[i] = heap[parent];
-                heap[parent] = temp;
-                i = parent;
+                int p = (i - 1) / 2;
+                if (heap[i].CompareTo(heap[p]) >= 0) break;
+                Swap(i, p); i = p;
             }
         }
-        
+
         public bool TryDequeue(out T item)
         {
-            if (heap.Count == 0)
-            {
-                item = default;
-                return false;
-            }
-            
+            if (heap.Count == 0) { item = default; return false; }
             item = heap[0];
-            int lastIndex = heap.Count - 1;
-            heap[0] = heap[lastIndex];
-            heap.RemoveAt(lastIndex);
-            
-            if (heap.Count > 0)
-                Heapify(0);
-                
+            int last = heap.Count - 1;
+            heap[0] = heap[last];
+            heap.RemoveAt(last);
+            if (heap.Count > 0) Heapify(0);
             return true;
         }
-        
+
         private void Heapify(int i)
         {
-            int smallest = i;
-            int left = 2 * i + 1;
-            int right = 2 * i + 2;
-            
-            if (left < heap.Count && heap[left].CompareTo(heap[smallest]) < 0)
-                smallest = left;
-                
-            if (right < heap.Count && heap[right].CompareTo(heap[smallest]) < 0)
-                smallest = right;
-                
-            if (smallest != i)
-            {
-                T temp = heap[i];
-                heap[i] = heap[smallest];
-                heap[smallest] = temp;
-                Heapify(smallest);
-            }
+            int s = i, l = 2*i+1, r = 2*i+2;
+            if (l < heap.Count && heap[l].CompareTo(heap[s]) < 0) s = l;
+            if (r < heap.Count && heap[r].CompareTo(heap[s]) < 0) s = r;
+            if (s != i) { Swap(i, s); Heapify(s); }
         }
-        
-        public bool ContainsCoord(Vector3Int coord)
+
+        private void Swap(int a, int b) { T t = heap[a]; heap[a] = heap[b]; heap[b] = t; }
+
+        public bool ContainsCoord(Vector3Int c)
         {
             foreach (var item in heap)
-            {
-                if (item is ChunkGenerationTask task && task.chunkCoord == coord)
-                    return true;
-            }
+                if (item is ChunkGenerationTask t && t.chunkCoord == c) return true;
             return false;
         }
-        
-        public void RemoveCoord(Vector3Int coord)
+
+        public void RemoveCoord(Vector3Int c)
         {
             for (int i = 0; i < heap.Count; i++)
             {
-                if (heap[i] is ChunkGenerationTask task && task.chunkCoord == coord)
+                if (heap[i] is ChunkGenerationTask t && t.chunkCoord == c)
                 {
                     heap[i] = heap[heap.Count - 1];
                     heap.RemoveAt(heap.Count - 1);
-                    
-                    if (i < heap.Count)
-                        Heapify(i);
-                    break;
+                    if (i < heap.Count) Heapify(i);
+                    return;
                 }
             }
         }
-        
-        public void Clear()
-        {
-            heap.Clear();
-        }
-        
-        public int Count => heap.Count;
+
+        public void Clear() => heap.Clear();
+        public int Count    => heap.Count;
     }
-    
+
+    // -------------------------------------------------------------------------
+    // Unity lifecycle
+    // -------------------------------------------------------------------------
+
     void Start()
     {
-        // Initialize seed
         if (randomizeSeed)
-        {
             worldSeed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
-        }
         Debug.Log($"World seed: {worldSeed}");
-        
+
         if (playerTransform == null)
         {
             GameObject player = GameObject.FindGameObjectWithTag("Player");
-            if (player != null) playerTransform = player.transform;
-            else playerTransform = Camera.main?.transform;
+            playerTransform = player != null ? player.transform : Camera.main?.transform;
         }
-        
-        roomGenerator = GetComponent<CrossChunkRoomGenerator>();
-        if (roomGenerator == null)
-            roomGenerator = gameObject.AddComponent<CrossChunkRoomGenerator>();
-        
+
+        roomGenerator = GetComponent<CrossChunkRoomGenerator>() ?? gameObject.AddComponent<CrossChunkRoomGenerator>();
         roomGenerator.Initialize(chunkSize, worldSeed);
-        
+
         chunkContainer = new GameObject("Chunks").transform;
         chunkContainer.SetParent(transform);
-        
+
         InitializeObjectPool();
         UpdateGenerationQueue();
+
+        // Coroutine uploads completed chunks to GPU, spreading work across frames
+        StartCoroutine(UploadReadyChunks());
     }
-    
+
     void OnDestroy()
     {
-        // Clean up all NativeArrays
         foreach (var kvp in chunkVoxelCache)
-        {
-            if (kvp.Value.IsCreated)
-                kvp.Value.Dispose();
-        }
+            if (kvp.Value.IsCreated) kvp.Value.Dispose();
         chunkVoxelCache.Clear();
+
+        lock (uploadLock)
+        {
+            while (readyToUpload.Count > 0)
+            {
+                var r = readyToUpload.Dequeue();
+                if (r.voxelData.IsCreated) r.voxelData.Dispose();
+            }
+        }
     }
-    
+
     void Update()
     {
         if (playerTransform == null) return;
-        
+
         UpdatePlayerChunk();
-        
+
         if (currentPlayerChunkCoord != lastPlayerChunkCoord)
         {
-            int movedDistance = GetChunkDistance(currentPlayerChunkCoord, lastPlayerChunkCoord);
-            UpdateGenerationQueue();
+            int moved = GetChunkDistance(currentPlayerChunkCoord, lastPlayerChunkCoord);
+            UpdateGenerationQueueIncremental();
             lastPlayerChunkCoord = currentPlayerChunkCoord;
-            
-            if (movedDistance > 2)
-            {
-                roomGenerator.PruneDistantData(currentPlayerChunkCoord);
-            }
+            if (moved > 2) roomGenerator.PruneDistantData(currentPlayerChunkCoord);
         }
-        
+
         ProcessGenerationQueue();
-        
         ProcessBoundaryUpdates();
     }
-    
+
+    // -------------------------------------------------------------------------
+    // Queue management
+    // -------------------------------------------------------------------------
+
     private void UpdatePlayerChunk()
     {
-        Vector3 playerPos = playerTransform.position;
-        Vector3Int newChunkCoord = WorldToChunkCoord(playerPos);
-        
-        if (newChunkCoord != currentPlayerChunkCoord)
-        {
-            currentPlayerChunkCoord = newChunkCoord;
-        }
+        Vector3Int n = WorldToChunkCoord(playerTransform.position);
+        if (n != currentPlayerChunkCoord) currentPlayerChunkCoord = n;
     }
-    
+
     private void UpdateGenerationQueue()
     {
         generationQueue.Clear();
-        
+        EnqueueMissingChunks();
+        UnloadOutOfRangeChunks();
+    }
+
+    private void UpdateGenerationQueueIncremental()
+    {
+        EnqueueMissingChunks();
+        UnloadOutOfRangeChunks();
+    }
+
+    private void EnqueueMissingChunks()
+    {
         for (int x = -renderDistance; x <= renderDistance; x++)
+        for (int y = -1; y <= 1; y++)
+        for (int z = -renderDistance; z <= renderDistance; z++)
         {
-            for (int y = -1; y <= 1; y++)
+            Vector3Int coord = currentPlayerChunkCoord + new Vector3Int(x, y, z);
+            if (loadedChunks.ContainsKey(coord))     continue;
+            if (currentlyGenerating.Contains(coord)) continue;
+            if (generationQueue.ContainsCoord(coord)) continue;
+            int dist = GetChunkDistance(coord, currentPlayerChunkCoord);
+            generationQueue.Enqueue(new ChunkGenerationTask
             {
-                for (int z = -renderDistance; z <= renderDistance; z++)
-                {
-                    Vector3Int chunkCoord = currentPlayerChunkCoord + new Vector3Int(x, y, z);
-                    int chunkHash = HashCoordinate(chunkCoord);
-                    
-                    if (loadedChunks.ContainsKey(chunkHash) || 
-                        currentlyGenerating.Contains(chunkHash))
-                        continue;
-                    
-                    int distance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
-                    int priority = CalculatePriority(distance, chunkCoord);
-                    
-                    generationQueue.Enqueue(new ChunkGenerationTask
-                    {
-                        chunkCoord = chunkCoord,
-                        priority = priority,
-                        timestamp = Time.time
-                    });
-                }
-            }
-        }
-        
-        chunksToUnloadBuffer.Clear();
-        if (loadedChunks.Count > 0)
-        {
-            NativeArray<int> loadedHashes = new NativeArray<int>(loadedChunks.Count, Allocator.TempJob);
-            NativeArray<int3> loadedCoords = new NativeArray<int3>(loadedChunks.Count, Allocator.TempJob);
-            NativeArray<byte> unloadFlags = new NativeArray<byte>(loadedChunks.Count, Allocator.TempJob, NativeArrayOptions.ClearMemory);
-
-            int i = 0;
-            foreach (var kvp in loadedChunks)
-            {
-                loadedHashes[i] = kvp.Key;
-                Vector3Int coord = kvp.Value.GetChunkCoord();
-                loadedCoords[i] = new int3(coord.x, coord.y, coord.z);
-                i++;
-            }
-
-            var unloadJob = new CalculateUnloadFlagsJob
-            {
-                loadedCoords = loadedCoords,
-                unloadFlags = unloadFlags,
-                playerCoord = new int3(currentPlayerChunkCoord.x, currentPlayerChunkCoord.y, currentPlayerChunkCoord.z),
-                renderDistance = renderDistance
-            };
-            unloadJob.Schedule(loadedCoords.Length, 64).Complete();
-
-            for (int idx = 0; idx < loadedHashes.Length; idx++)
-            {
-                if (unloadFlags[idx] != 0)
-                {
-                    chunksToUnloadBuffer.Add(loadedHashes[idx]);
-                }
-            }
-
-            unloadFlags.Dispose();
-            loadedCoords.Dispose();
-            loadedHashes.Dispose();
-        }
-        
-        foreach (var chunkHash in chunksToUnloadBuffer)
-        {
-            UnloadChunk(chunkHash);
+                chunkCoord = coord,
+                priority   = CalculatePriority(dist),
+                timestamp  = Time.time
+            });
         }
     }
-    
-    private int CalculatePriority(int distance, Vector3Int chunkCoord)
+
+    private void UnloadOutOfRangeChunks()
     {
-        if (distance == 0) return 0;
+        if (loadedChunks.Count == 0) return;
+
+        var coordList = new List<Vector3Int>(loadedChunks.Keys);
+        var native    = new NativeArray<int3>(coordList.Count, Allocator.TempJob);
+        var flags     = new NativeArray<byte>(coordList.Count, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+
+        for (int i = 0; i < coordList.Count; i++)
+            native[i] = new int3(coordList[i].x, coordList[i].y, coordList[i].z);
+
+        new CalculateUnloadFlagsJob
+        {
+            loadedCoords   = native,
+            unloadFlags    = flags,
+            playerCoord    = new int3(currentPlayerChunkCoord.x, currentPlayerChunkCoord.y, currentPlayerChunkCoord.z),
+            renderDistance = renderDistance
+        }.Schedule(coordList.Count, 64).Complete();
+
+        chunksToUnloadBuffer.Clear();
+        for (int i = 0; i < coordList.Count; i++)
+            if (flags[i] != 0) chunksToUnloadBuffer.Add(coordList[i]);
+
+        flags.Dispose();
+        native.Dispose();
+
+        foreach (var coord in chunksToUnloadBuffer)
+            UnloadChunk(coord);
+    }
+
+    private int CalculatePriority(int distance)
+    {
+        if (distance <= 0) return 0;
         if (distance == 1) return 1;
         if (distance == 2) return 2;
         return 3 + distance;
     }
-    
+
+    // -------------------------------------------------------------------------
+    // Background generation dispatch
+    // -------------------------------------------------------------------------
+
     private void ProcessGenerationQueue()
     {
-        int chunksProcessed = 0;
-        
-        while (chunksProcessed < maxChunksPerFrame && generationQueue.Count > 0)
+        while (currentlyGenerating.Count < maxConcurrentGenerations && generationQueue.Count > 0)
         {
-            if (generationQueue.TryDequeue(out ChunkGenerationTask task))
+            if (!generationQueue.TryDequeue(out ChunkGenerationTask task)) break;
+
+            int dist = GetChunkDistance(task.chunkCoord, currentPlayerChunkCoord);
+            if (cancelDistantGeneration && dist > renderDistance + 1) continue;
+            if (loadedChunks.ContainsKey(task.chunkCoord)) continue;
+
+            currentlyGenerating.Add(task.chunkCoord);
+
+            // Allocate objects on main thread (Unity API)
+            DungeonChunk chunk = GetChunkFromPool();
+            if (chunk == null)
             {
-                int chunkHash = HashCoordinate(task.chunkCoord);
-                int currentDistance = GetChunkDistance(task.chunkCoord, currentPlayerChunkCoord);
-                
-                if (cancelDistantGeneration && currentDistance > renderDistance + 1)
-                {
-                    currentlyGenerating.Remove(chunkHash);
-                    continue;
-                }
-                
-                currentlyGenerating.Add(chunkHash);
-                
-                if (asyncGeneration)
-                {
-                    // Start async generation (simplified for now)
-                    GenerateChunkImmediate(task.chunkCoord);
-                }
-                else
-                {
-                    GenerateChunkImmediate(task.chunkCoord);
-                }
-                
-                currentlyGenerating.Remove(chunkHash);
-                chunksProcessed++;
+                currentlyGenerating.Remove(task.chunkCoord);
+                Debug.LogWarning("[InfiniteChunkManager] Pool exhausted, skipping chunk.");
+                continue;
             }
+
+            chunk.transform.position = ChunkCoordToWorld(task.chunkCoord);
+            chunk.transform.SetParent(chunkContainer);
+            chunk.name = $"Chunk_{task.chunkCoord.x}_{task.chunkCoord.y}_{task.chunkCoord.z}";
+            chunk.SetChunkCoord(task.chunkCoord, worldSeed);
+            chunk.SetChunkManager(this);
+            chunk.Initialize(chunkSize);
+
+            int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
+            NativeArray<byte> voxelData = new NativeArray<byte>(
+                voxelCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+
+            // Capture loop variables for the closure
+            Vector3Int capturedCoord = task.chunkCoord;
+            Vector3Int capturedSize  = chunkSize;
+
+            // Hand off the heavy work to a thread pool thread
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                var result = new ChunkBuildResult
+                {
+                    chunkCoord = capturedCoord,
+                    chunk      = chunk,
+                    voxelData  = voxelData,
+                    success    = false
+                };
+
+                try
+                {
+                    // Step 1: voxel generation (room carving) — pure data, thread-safe
+                    roomGenerator.GenerateForChunk(capturedCoord, capturedSize, ref voxelData);
+
+                    // Step 2: build mesh arrays — pure data, no Unity API
+                    result.meshData = chunk.BuildMeshData(voxelData);
+                    result.success  = true;
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"[Thread] Chunk {capturedCoord} failed: {e.Message}\n{e.StackTrace}");
+                }
+
+                lock (uploadLock)
+                    readyToUpload.Enqueue(result);
+            });
         }
     }
-    
+
+    // -------------------------------------------------------------------------
+    // Upload coroutine — main thread only, spreads GPU uploads across frames
+    // -------------------------------------------------------------------------
+
+    private IEnumerator UploadReadyChunks()
+    {
+        while (true)
+        {
+            int uploaded = 0;
+
+            while (uploaded < maxMeshUploadsPerFrame)
+            {
+                ChunkBuildResult result = null;
+                lock (uploadLock)
+                {
+                    if (readyToUpload.Count > 0)
+                        result = readyToUpload.Dequeue();
+                }
+                if (result == null) break;
+
+                currentlyGenerating.Remove(result.chunkCoord);
+
+                bool discard = !result.success
+                    || result.meshData == null
+                    || (cancelDistantGeneration && GetChunkDistance(result.chunkCoord, currentPlayerChunkCoord) > renderDistance)
+                    || chunkVoxelCache.ContainsKey(result.chunkCoord); // duplicate
+
+                if (discard)
+                {
+                    if (result.voxelData.IsCreated) result.voxelData.Dispose();
+                    ReturnChunkToPool(result.chunk);
+                    uploaded++;
+                    continue;
+                }
+
+                // Store voxel cache and upload mesh — both must happen on main thread
+                chunkVoxelCache[result.chunkCoord] = result.voxelData;
+                result.chunk.UploadMesh(result.meshData);
+                loadedChunks[result.chunkCoord] = result.chunk;
+                MarkAdjacentChunksForUpdate(result.chunkCoord);
+
+                uploaded++;
+            }
+
+            yield return null;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Boundary updates
+    // -------------------------------------------------------------------------
+
     private void ProcessBoundaryUpdates()
     {
         if (chunksNeedingBoundaryUpdate.Count == 0) return;
-        
-        int maxUpdates = Mathf.Min(3, chunksNeedingBoundaryUpdate.Count);
+
+        int max = Mathf.Min(2, chunksNeedingBoundaryUpdate.Count);
         boundaryUpdateBuffer.Clear();
-        
-        foreach (var chunkHash in chunksNeedingBoundaryUpdate)
+
+        foreach (var coord in chunksNeedingBoundaryUpdate)
         {
-            boundaryUpdateBuffer.Add(chunkHash);
-            if (boundaryUpdateBuffer.Count >= maxUpdates) break;
+            boundaryUpdateBuffer.Add(coord);
+            if (boundaryUpdateBuffer.Count >= max) break;
         }
-        
-        foreach (var chunkHash in boundaryUpdateBuffer)
+
+        foreach (var coord in boundaryUpdateBuffer)
         {
-            chunksNeedingBoundaryUpdate.Remove(chunkHash);
-            if (loadedChunks.TryGetValue(chunkHash, out DungeonChunk chunk))
-            {
-                chunk.UpdateBoundaryMeshes();
-            }
+            chunksNeedingBoundaryUpdate.Remove(coord);
+            if (loadedChunks.TryGetValue(coord, out DungeonChunk c))
+                c.UpdateBoundaryMeshes();
         }
     }
-    
-    private void GenerateChunkImmediate(Vector3Int chunkCoord)
-    {
-        int chunkHash = HashCoordinate(chunkCoord);
-        int currentDistance = GetChunkDistance(chunkCoord, currentPlayerChunkCoord);
-        
-        if (cancelDistantGeneration && currentDistance > renderDistance)
-            return;
-        
-        if (loadedChunks.ContainsKey(chunkHash)) return;
-        
-        DungeonChunk chunk = GetChunkFromPool();
-        if (chunk == null)
-        {
-            Debug.LogWarning("Failed to get chunk from pool");
-            return;
-        }
-        
-        try
-        {
-            Vector3 worldPos = ChunkCoordToWorld(chunkCoord);
-            chunk.transform.position = worldPos;
-            chunk.transform.SetParent(chunkContainer);
-            chunk.name = $"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}";
-            
-            chunk.SetChunkCoord(chunkCoord, worldSeed);
-            chunk.SetChunkManager(this);
-            
-            if (!chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
-            {
-                int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
-                voxelData = new NativeArray<byte>(voxelCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
-                roomGenerator.GenerateForChunk(chunkCoord, chunkSize, ref voxelData);
-                chunkVoxelCache[chunkHash] = voxelData;
-                
-                MarkAdjacentChunksForUpdate(chunkCoord);
-            }
-            
-            chunk.Initialize(chunkSize);
-            chunk.GenerateMesh(voxelData);
-            
-            loadedChunks[chunkHash] = chunk;
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Error generating chunk {chunkCoord}: {e.Message}");
-            ReturnChunkToPool(chunk);
-        }
-    }
-    
-    private void MarkAdjacentChunksForUpdate(Vector3Int newChunkCoord)
+
+    private void MarkAdjacentChunksForUpdate(Vector3Int coord)
     {
         foreach (var dir in CardinalDirections)
         {
-            Vector3Int adjacentCoord = newChunkCoord + dir;
-            int adjacentHash = HashCoordinate(adjacentCoord);
-            
-            if (loadedChunks.ContainsKey(adjacentHash) && !chunksNeedingBoundaryUpdate.Contains(adjacentHash))
-            {
-                chunksNeedingBoundaryUpdate.Add(adjacentHash);
-            }
+            Vector3Int adj = coord + dir;
+            if (loadedChunks.ContainsKey(adj))
+                chunksNeedingBoundaryUpdate.Add(adj);
         }
     }
-    
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
+
     public bool TryGetVoxelData(Vector3Int chunkCoord, Vector3Int localPos, out bool isSolid)
     {
-        int chunkHash = HashCoordinate(chunkCoord);
-        
-        if (currentlyGenerating.Contains(chunkHash))
-        {
-            isSolid = true;
-            return false;
-        }
-        
-        if (chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
+        if (currentlyGenerating.Contains(chunkCoord)) { isSolid = true; return false; }
+
+        if (chunkVoxelCache.TryGetValue(chunkCoord, out NativeArray<byte> voxelData))
         {
             if (localPos.x >= 0 && localPos.x < chunkSize.x &&
                 localPos.y >= 0 && localPos.y < chunkSize.y &&
                 localPos.z >= 0 && localPos.z < chunkSize.z)
             {
-                int index = localPos.x * (chunkSize.y * chunkSize.z) + localPos.y * chunkSize.z + localPos.z;
-                isSolid = voxelData[index] != 0;
+                isSolid = voxelData[localPos.x * (chunkSize.y * chunkSize.z) + localPos.y * chunkSize.z + localPos.z] != 0;
                 return true;
             }
         }
-        
+
         isSolid = false;
         return false;
     }
-    
+
     public Vector3Int WorldToChunkCoord(Vector3 worldPos)
     {
         return new Vector3Int(
@@ -482,63 +483,86 @@ public class InfiniteChunkManager : MonoBehaviour
             Mathf.FloorToInt(worldPos.z / chunkSize.z)
         );
     }
-    
-    private Vector3 ChunkCoordToWorld(Vector3Int chunkCoord)
-    {
-        return new Vector3(
-            chunkCoord.x * chunkSize.x,
-            chunkCoord.y * chunkSize.y,
-            chunkCoord.z * chunkSize.z
-        );
-    }
-    
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private Vector3 ChunkCoordToWorld(Vector3Int c)
+        => new Vector3(c.x * chunkSize.x, c.y * chunkSize.y, c.z * chunkSize.z);
+
     private int GetChunkDistance(Vector3Int a, Vector3Int b)
+        => Mathf.Max(Mathf.Abs(a.x-b.x), Mathf.Abs(a.y-b.y), Mathf.Abs(a.z-b.z));
+
+    private void UnloadChunk(Vector3Int coord)
     {
-        return Mathf.Max(
-            Mathf.Abs(a.x - b.x),
-            Mathf.Abs(a.y - b.y),
-            Mathf.Abs(a.z - b.z)
-        );
-    }
-    
-    private void UnloadChunk(int chunkHash)
-    {
-        if (loadedChunks.TryGetValue(chunkHash, out DungeonChunk chunk))
+        if (!loadedChunks.TryGetValue(coord, out DungeonChunk chunk)) return;
+
+        ReturnChunkToPool(chunk);
+        loadedChunks.Remove(coord);
+        roomGenerator.ClearChunkData(coord);
+
+        if (chunkVoxelCache.TryGetValue(coord, out NativeArray<byte> vd))
         {
-            ReturnChunkToPool(chunk);
-            loadedChunks.Remove(chunkHash);
-            
-            roomGenerator.ClearChunkData(chunk.GetChunkCoord());
-            
-            if (chunkVoxelCache.TryGetValue(chunkHash, out NativeArray<byte> voxelData))
-            {
-                if (voxelData.IsCreated)
-                    voxelData.Dispose();
-                chunkVoxelCache.Remove(chunkHash);
-            }
-            
-            UpdateAdjacentChunks(chunk.GetChunkCoord());
+            if (vd.IsCreated) vd.Dispose();
+            chunkVoxelCache.Remove(coord);
         }
+
+        UpdateAdjacentChunks(coord);
     }
-    
-    private void UpdateAdjacentChunks(Vector3Int unloadedChunkCoord)
+
+    private void UpdateAdjacentChunks(Vector3Int unloaded)
     {
         foreach (var dir in CardinalDirections)
         {
-            Vector3Int adjacentCoord = unloadedChunkCoord + dir;
-            int adjacentHash = HashCoordinate(adjacentCoord);
-            
-            if (loadedChunks.ContainsKey(adjacentHash) && !chunksNeedingBoundaryUpdate.Contains(adjacentHash))
-            {
-                chunksNeedingBoundaryUpdate.Add(adjacentHash);
-            }
+            Vector3Int adj = unloaded + dir;
+            if (loadedChunks.ContainsKey(adj))
+                chunksNeedingBoundaryUpdate.Add(adj);
         }
     }
-    
-    private int HashCoordinate(Vector3Int coord)
+
+    // -------------------------------------------------------------------------
+    // Object pool
+    // -------------------------------------------------------------------------
+
+    private void InitializeObjectPool()
     {
-        return coord.x * HASH_PRIME_X ^ coord.y * HASH_PRIME_Y ^ coord.z * HASH_PRIME_Z;
+        if (chunkPrefab == null) { Debug.LogError("Chunk Prefab is not assigned!"); return; }
+
+        int xzDiam   = 2 * renderDistance + 1;
+        int poolSize = xzDiam * xzDiam * 3 + maxConcurrentGenerations + 8;
+
+        for (int i = 0; i < poolSize; i++)
+        {
+            DungeonChunk c = Instantiate(chunkPrefab);
+            c.gameObject.SetActive(false);
+            chunkPool.Enqueue(c);
+        }
     }
+
+    private DungeonChunk GetChunkFromPool()
+    {
+        if (useObjectPooling && chunkPool.Count > 0)
+        {
+            DungeonChunk c = chunkPool.Dequeue();
+            c.gameObject.SetActive(true);
+            return c;
+        }
+        if (useObjectPooling)
+            Debug.LogWarning("[InfiniteChunkManager] Pool exhausted.");
+        return Instantiate(chunkPrefab);
+    }
+
+    private void ReturnChunkToPool(DungeonChunk chunk)
+    {
+        if (chunk == null) return;
+        if (useObjectPooling) { chunk.Clear(); chunk.gameObject.SetActive(false); chunkPool.Enqueue(chunk); }
+        else Destroy(chunk.gameObject);
+    }
+
+    // -------------------------------------------------------------------------
+    // Jobs
+    // -------------------------------------------------------------------------
 
     [BurstCompile]
     private struct CalculateUnloadFlagsJob : IJobParallelFor
@@ -546,67 +570,13 @@ public class InfiniteChunkManager : MonoBehaviour
         [ReadOnly] public NativeArray<int3> loadedCoords;
         public NativeArray<byte> unloadFlags;
         public int3 playerCoord;
-        public int renderDistance;
+        public int  renderDistance;
 
         public void Execute(int index)
         {
-            int3 coord = loadedCoords[index];
-            int dx = math.abs(coord.x - playerCoord.x);
-            int dy = math.abs(coord.y - playerCoord.y);
-            int dz = math.abs(coord.z - playerCoord.z);
-            int distance = math.max(dx, math.max(dy, dz));
-            unloadFlags[index] = (byte)(distance > renderDistance ? 1 : 0);
-        }
-    }
-    
-    private void InitializeObjectPool()
-    {
-        if (chunkPrefab == null)
-        {
-            Debug.LogError("Chunk Prefab is not assigned!");
-            return;
-        }
-        
-        for (int i = 0; i < 15; i++)
-        {
-            DungeonChunk chunk = Instantiate(chunkPrefab);
-            chunk.gameObject.SetActive(false);
-            chunkPool.Enqueue(chunk);
-        }
-    }
-    
-    private DungeonChunk GetChunkFromPool()
-    {
-        if (useObjectPooling && chunkPool.Count > 0)
-        {
-            DungeonChunk chunk = chunkPool.Dequeue();
-            chunk.gameObject.SetActive(true);
-            return chunk;
-        }
-        else if (useObjectPooling)
-        {
-            DungeonChunk chunk = Instantiate(chunkPrefab);
-            return chunk;
-        }
-        else
-        {
-            return Instantiate(chunkPrefab);
-        }
-    }
-    
-    private void ReturnChunkToPool(DungeonChunk chunk)
-    {
-        if (chunk == null) return;
-        
-        if (useObjectPooling)
-        {
-            chunk.Clear();
-            chunk.gameObject.SetActive(false);
-            chunkPool.Enqueue(chunk);
-        }
-        else
-        {
-            Destroy(chunk.gameObject);
+            int3 c = loadedCoords[index];
+            unloadFlags[index] = (byte)(math.max(math.abs(c.x - playerCoord.x),
+                math.max(math.abs(c.y - playerCoord.y), math.abs(c.z - playerCoord.z))) > renderDistance ? 1 : 0);
         }
     }
 }

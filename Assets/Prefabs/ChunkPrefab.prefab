@@ -11,6 +11,8 @@ GameObject:
   - component: {fileID: 5304483167836589877}
   - component: {fileID: 7088493295685261955}
   - component: {fileID: 3993240864670331233}
+  - component: {fileID: 7443947474657208954}
+  - component: {fileID: 5718207680687896555}
   m_Layer: 0
   m_Name: ChunkPrefab
   m_TagString: Untagged
@@ -45,9 +47,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e0f35900027322a42b234de097668e8d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  lightPlacementChance: 0.02
-  minLightsPerRoom: 1
-  maxLightsPerRoom: 3
+  lightPlacementChance: 0.04
   lightDecay: 0.1
   lightPropagationSteps: 15
   lightSourceIntensity: 1
@@ -98,3 +98,33 @@ MeshRenderer:
   m_SortingLayer: 0
   m_SortingOrder: 0
   m_AdditionalVertexStreams: {fileID: 0}
+--- !u!33 &7443947474657208954
+MeshFilter:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4771283657701135733}
+  m_Mesh: {fileID: 0}
+--- !u!64 &5718207680687896555
+MeshCollider:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4771283657701135733}
+  m_Material: {fileID: 0}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_LayerOverridePriority: 0
+  m_IsTrigger: 0
+  m_ProvidesContacts: 0
+  m_Enabled: 1
+  serializedVersion: 5
+  m_Convex: 0
+  m_CookingOptions: 30
+  m_Mesh: {fileID: 0}
