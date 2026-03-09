@@ -408,7 +408,7 @@ MonoBehaviour:
   useObjectPooling: 1
   maxChunksPerFrame: 1
   cancelDistantGeneration: 1
-  asyncGeneration: 0
+  asyncGeneration: 1
   worldSeed: 123456
   randomizeSeed: 1
   chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
