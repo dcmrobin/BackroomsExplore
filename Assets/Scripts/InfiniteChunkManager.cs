@@ -18,29 +18,33 @@ public class InfiniteChunkManager : MonoBehaviour
 
     [Header("Chunk Settings")]
     public Vector3Int chunkSize = new Vector3Int(80, 40, 80);
-    // FIX: Reduced default from 3 to 2 — cuts loaded chunk count from 343 to 125,
-    // critical for the 991 MB shared VRAM budget on this APU.
-    [SerializeField] private int renderDistance = 2;
+    [SerializeField] private int  renderDistance = 2;
     [SerializeField] private bool useObjectPooling = true;
 
     [Header("Generation Settings")]
-    // 1 upload per frame is safest on low-end hardware
-    [SerializeField] private int maxMeshUploadsPerFrame = 1;
-    // FIX: Reduced default from 4 to 2 — on a 4-core APU, 4 threads saturates
-    // all cores and starves Unity's own render/physics threads.
-    [SerializeField] private int maxConcurrentGenerations = 2;
+    [SerializeField] private int  maxMeshUploadsPerFrame = 1;
+    [SerializeField] private int  maxConcurrentGenerations = 2;
     [SerializeField] private bool cancelDistantGeneration = true;
 
     [Header("Seed Settings")]
-    [SerializeField] private int worldSeed = 123456;
+    [SerializeField] private int  worldSeed = 123456;
     [SerializeField] private bool randomizeSeed = true;
 
     [Header("References")]
     [SerializeField] private DungeonChunk chunkPrefab;
     [SerializeField] private Transform    playerTransform;
-    [SerializeField] private Material     chunkMaterial;
+    // Base material cloned per biome — must support _MainTex, _FloorTex, _CeilTex
+    // (or fall back gracefully to Standard shader with wall tint)
+    [SerializeField] private Material chunkMaterial;
+
+    /// <summary>Exposed so DungeonChunk can clone it for per-biome instances.</summary>
+    public Material ChunkMaterial => chunkMaterial;
+
+    [Header("Biome Generation")]
+    [SerializeField] private BiomeGenerationSettings biomeSettings = new BiomeGenerationSettings();
 
     private CrossChunkRoomGenerator roomGenerator;
+    private BiomeRegistry           biomeRegistry;
 
     // All accessed only on main thread
     private Dictionary<Vector3Int, DungeonChunk>      loadedChunks    = new Dictionary<Vector3Int, DungeonChunk>();
@@ -52,12 +56,10 @@ public class InfiniteChunkManager : MonoBehaviour
     private PriorityQueue<ChunkGenerationTask> generationQueue     = new PriorityQueue<ChunkGenerationTask>();
     private HashSet<Vector3Int>                currentlyGenerating = new HashSet<Vector3Int>();
 
-    // Background threads push finished results here; main thread drains each frame
     private readonly Queue<ChunkBuildResult> readyToUpload         = new Queue<ChunkBuildResult>();
     private readonly Queue<ChunkBuildResult> readyToUploadBoundary = new Queue<ChunkBuildResult>();
     private readonly object                  uploadLock            = new object();
 
-    // Tracks chunks currently being rebuilt as boundary updates
     private HashSet<Vector3Int> currentlyRebuildingBoundary = new HashSet<Vector3Int>();
 
     private Vector3Int currentPlayerChunkCoord = Vector3Int.zero;
@@ -84,13 +86,13 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
 
-    // Everything computed off main thread; uploaded on main thread
     public class ChunkBuildResult
     {
         public Vector3Int        chunkCoord;
         public DungeonChunk      chunk;
         public NativeArray<byte> voxelData;
         public DungeonChunk.MeshData meshData;
+        public BiomeDefinition   biome;   // resolved on background thread, applied on main thread
         public bool              success;
     }
 
@@ -176,6 +178,11 @@ public class InfiniteChunkManager : MonoBehaviour
             playerTransform = player != null ? player.transform : Camera.main?.transform;
         }
 
+        // Initialise biome registry first — all biomes and textures generated here
+        biomeRegistry = new BiomeRegistry();
+        biomeRegistry.Initialize(worldSeed, biomeSettings);
+        Debug.Log($"BiomeRegistry initialised with {biomeRegistry.AllBiomes.Count} biomes.");
+
         roomGenerator = GetComponent<CrossChunkRoomGenerator>() ?? gameObject.AddComponent<CrossChunkRoomGenerator>();
         roomGenerator.Initialize(chunkSize, worldSeed);
 
@@ -203,7 +210,7 @@ public class InfiniteChunkManager : MonoBehaviour
                 if (r.voxelData.IsCreated) r.voxelData.Dispose();
             }
             while (readyToUploadBoundary.Count > 0)
-                readyToUploadBoundary.Dequeue(); // voxelData owned by cache, don't dispose
+                readyToUploadBoundary.Dequeue();
         }
     }
 
@@ -335,6 +342,7 @@ public class InfiniteChunkManager : MonoBehaviour
             chunk.name = $"Chunk_{task.chunkCoord.x}_{task.chunkCoord.y}_{task.chunkCoord.z}";
             chunk.SetChunkCoord(task.chunkCoord, worldSeed);
             chunk.SetChunkManager(this);
+            chunk.SetBiomeRegistry(biomeRegistry);  // pass registry so chunk can resolve its biome
             chunk.Initialize(chunkSize);
 
             int voxelCount = chunkSize.x * chunkSize.y * chunkSize.z;
@@ -344,6 +352,15 @@ public class InfiniteChunkManager : MonoBehaviour
             Vector3Int capturedCoord = task.chunkCoord;
             Vector3Int capturedSize  = chunkSize;
 
+            // Resolve the biome for this chunk's world-space centre on the main thread
+            // (BiomeRegistry.GetBiomeAt is read-only and thread-safe, but resolving
+            // here keeps the ThreadPool lambda free of Unity API calls).
+            Vector3 chunkWorldCentre = new Vector3(
+                (capturedCoord.x + 0.5f) * capturedSize.x,
+                (capturedCoord.y + 0.5f) * capturedSize.y,
+                (capturedCoord.z + 0.5f) * capturedSize.z);
+            BiomeDefinition capturedBiome = biomeRegistry.GetBiomeAt(chunkWorldCentre);
+
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 var result = new ChunkBuildResult
@@ -351,13 +368,16 @@ public class InfiniteChunkManager : MonoBehaviour
                     chunkCoord = capturedCoord,
                     chunk      = chunk,
                     voxelData  = voxelData,
+                    biome      = capturedBiome,
                     success    = false
                 };
 
                 try
                 {
-                    roomGenerator.GenerateForChunk(capturedCoord, capturedSize, ref voxelData);
-                    result.meshData = chunk.BuildMeshData(voxelData);
+                    // Pass biome so room size, corridor dimensions etc vary per biome
+                    roomGenerator.GenerateForChunk(capturedCoord, capturedSize, ref voxelData, capturedBiome);
+                    // BuildMeshData now also resolves + returns the biome
+                    result.meshData = chunk.BuildMeshData(voxelData, out result.biome);
                     result.success  = true;
                 }
                 catch (System.Exception e)
@@ -372,7 +392,7 @@ public class InfiniteChunkManager : MonoBehaviour
     }
 
     // -------------------------------------------------------------------------
-    // Upload coroutines — main thread only, spreads GPU uploads across frames
+    // Upload coroutines
     // -------------------------------------------------------------------------
 
     private IEnumerator UploadReadyChunks()
@@ -407,7 +427,8 @@ public class InfiniteChunkManager : MonoBehaviour
                 }
 
                 chunkVoxelCache[result.chunkCoord] = result.voxelData;
-                result.chunk.UploadMesh(result.meshData);
+                // Pass biome so UploadMesh can apply material on main thread
+                result.chunk.UploadMesh(result.meshData, result.biome);
                 loadedChunks[result.chunkCoord] = result.chunk;
                 MarkAdjacentChunksForUpdate(result.chunkCoord);
 
@@ -418,8 +439,6 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
 
-    // Separate coroutine for boundary mesh uploads — keeps fresh chunk uploads
-    // from being starved by boundary rebuilds.
     private IEnumerator UploadBoundaryRebuildResults()
     {
         while (true)
@@ -440,7 +459,7 @@ public class InfiniteChunkManager : MonoBehaviour
                 if (result.success && result.meshData != null
                     && loadedChunks.ContainsKey(result.chunkCoord))
                 {
-                    result.chunk.UploadMesh(result.meshData);
+                    result.chunk.UploadMesh(result.meshData, result.biome);
                 }
                 uploaded++;
             }
@@ -475,9 +494,9 @@ public class InfiniteChunkManager : MonoBehaviour
 
             currentlyRebuildingBoundary.Add(coord);
 
-            Vector3Int capturedCoord      = coord;
-            DungeonChunk capturedChunk    = chunk;
-            NativeArray<byte> capturedVox = voxelData;
+            Vector3Int        capturedCoord = coord;
+            DungeonChunk      capturedChunk = chunk;
+            NativeArray<byte> capturedVox   = voxelData;
 
             ThreadPool.QueueUserWorkItem(_ =>
             {
@@ -491,7 +510,7 @@ public class InfiniteChunkManager : MonoBehaviour
 
                 try
                 {
-                    result.meshData = capturedChunk.BuildMeshData(capturedVox);
+                    result.meshData = capturedChunk.BuildMeshData(capturedVox, out result.biome);
                     result.success  = true;
                 }
                 catch (System.Exception e)
@@ -538,14 +557,30 @@ public class InfiniteChunkManager : MonoBehaviour
         return false;
     }
 
-    public Vector3Int WorldToChunkCoord(Vector3 worldPos)
+    /// <summary>
+    /// Returns the baked light level at a world-space voxel position by looking
+    /// it up in the owning chunk's DungeonChunk component.
+    /// Returns -1 if the chunk isn't loaded or hasn't been lit yet.
+    /// Called by DungeonChunk.GetFaceLightLevel / GetVL for cross-chunk lighting.
+    /// </summary>
+    public float GetLightAtWorldPos(Vector3Int worldPos)
     {
-        return new Vector3Int(
+        Vector3Int coord = new Vector3Int(
+            Mathf.FloorToInt((float)worldPos.x / chunkSize.x),
+            Mathf.FloorToInt((float)worldPos.y / chunkSize.y),
+            Mathf.FloorToInt((float)worldPos.z / chunkSize.z));
+
+        if (!loadedChunks.TryGetValue(coord, out DungeonChunk chunk)) return -1f;
+
+        Vector3Int local = worldPos - Vector3Int.Scale(coord, chunkSize);
+        return chunk.GetLightValue(local);
+    }
+
+    public Vector3Int WorldToChunkCoord(Vector3 worldPos)
+        => new Vector3Int(
             Mathf.FloorToInt(worldPos.x / chunkSize.x),
             Mathf.FloorToInt(worldPos.y / chunkSize.y),
-            Mathf.FloorToInt(worldPos.z / chunkSize.z)
-        );
-    }
+            Mathf.FloorToInt(worldPos.z / chunkSize.z));
 
     // -------------------------------------------------------------------------
     // Helpers

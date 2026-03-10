@@ -413,7 +413,68 @@ MonoBehaviour:
   randomizeSeed: 1
   chunkPrefab: {fileID: 7088493295685261955, guid: 8ec8f6ba26be46a45b1151d929730f02, type: 3}
   playerTransform: {fileID: 1585999911}
-  chunkMaterial: {fileID: 2100000, guid: dde4d2e68f1a9a544b1f5afd8665c98b, type: 2}
+  chunkMaterial: {fileID: 2100000, guid: bc70d7baf9498cc44ac57b75651f7fd1, type: 2}
+  biomeSettings:
+    biomeCount: 18
+    textureResolution: 256
+    noiseSampleScale: 0.001
+    biomeJitter: 0.9
+    biomeBorderBlend: 0
+    wallGrain:
+      min: 0.2
+      max: 0.7
+    floorGrain:
+      min: 0.4
+      max: 0.9
+    ceilingGrain:
+      min: 0.1
+      max: 0.4
+    wallPatternScale:
+      min: 0.04
+      max: 0.16
+    floorPatternScale:
+      min: 0.05
+      max: 0.2
+    ceilingPatternScale:
+      min: 0.03
+      max: 0.13
+    wallPatternStrengthMin: 0.2
+    wallPatternStrengthMax: 0.75
+    floorPatternStrengthMin: 0.2
+    floorPatternStrengthMax: 0.75
+    ceilingPatternStrengthMin: 0.15
+    ceilingPatternStrengthMax: 0.6
+    lightPlacementChance:
+      min: 0.25
+      max: 0.5
+    lightPropagationStepsMin: 8
+    lightPropagationStepsMax: 25
+    lightDecay:
+      min: 0.01
+      max: 0.15
+    lightMatchesWallChance: 0.6
+    lightWhiteChance: 0.47
+    lightSaturation:
+      min: 0.2
+      max: 0.6
+    roomThreshold:
+      min: 0.55
+      max: 0.8
+    roomExpansionThreshold:
+      min: 0.35
+      max: 0.85
+    roomSizeMin:
+      min: 3
+      max: 10
+    roomSizeMax:
+      min: 12
+      max: 40
+    corridorWidth:
+      min: 1
+      max: 6
+    corridorHeight:
+      min: 1
+      max: 6
 --- !u!4 &1882148090
 Transform:
   m_ObjectHideFlags: 0
