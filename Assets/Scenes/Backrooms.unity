@@ -415,7 +415,7 @@ MonoBehaviour:
   playerTransform: {fileID: 1585999911}
   chunkMaterial: {fileID: 2100000, guid: bc70d7baf9498cc44ac57b75651f7fd1, type: 2}
   biomeSettings:
-    biomeCount: 18
+    biomeCount: 16
     textureResolution: 256
     noiseSampleScale: 0.001
     biomeJitter: 0.9
@@ -447,11 +447,11 @@ MonoBehaviour:
     lightPlacementChance:
       min: 0.25
       max: 0.5
-    lightPropagationStepsMin: 8
+    lightPropagationStepsMin: 9
     lightPropagationStepsMax: 25
-    lightDecay:
-      min: 0.01
-      max: 0.15
+    lightFalloffTarget:
+      min: 0.25
+      max: 0.65
     lightMatchesWallChance: 0.6
     lightWhiteChance: 0.47
     lightSaturation:

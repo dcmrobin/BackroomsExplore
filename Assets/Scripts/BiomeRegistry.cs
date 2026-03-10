@@ -55,7 +55,12 @@ public class BiomeDefinition
 
     // Lighting
     public float lightPlacementChance;
-    public float lightDecay;
+    // lightDecay is NOT stored independently — it is always derived from
+    // lightPropagationSteps and lightFalloffTarget so that light never
+    // hard-cuts: decay = falloffTarget^(1/steps), meaning after `steps`
+    // hops light reaches exactly `lightFalloffTarget` fraction of full brightness.
+    public float lightDecay;            // computed, do not set manually
+    public float lightFalloffTarget;    // what fraction of brightness reaches `steps` hops away
     public int   lightPropagationSteps;
     public Color lightTint;
 
@@ -133,14 +138,19 @@ public class BiomeGenerationSettings
 
     [Header("Lighting — Propagation Steps")]
     [Tooltip("Min steps. More steps = light travels further. Bias is towards Max.")]
-    [Range(2, 25)] public int lightPropagationStepsMin = 3;
+    [Range(2, 25)] public int lightPropagationStepsMin = 8;
     [Tooltip("Max steps (distribution is biased towards this end)")]
-    [Range(2, 25)] public int lightPropagationStepsMax = 25;
+    [Range(2, 25)] public int lightPropagationStepsMax = 20;
 
-    [Header("Lighting — Decay")]
-    [Tooltip("Multiplicative decay per propagation hop (lower = faster falloff). " +
-             "This overrides the per-biome lightDecay field to use a consistent exponential model.")]
-    public FloatRange lightDecay = new FloatRange(0.06f, 0.22f);
+    [Header("Lighting — Falloff")]
+    [Tooltip("How bright (0–1) the light is at maximum propagation distance. " +
+             "0.0 = fully dark at the edge (dramatic), 0.3 = still 30% bright at the edge (soft). " +
+             "lightDecay per hop is derived automatically as falloffTarget^(1/steps), " +
+             "so light always fades gracefully regardless of propagation step count." + "Fraction of full brightness light reaches at maximum propagation distance. " +
+             "Higher = light travels further and fades more gently. " +
+             "0.25 = fairly moody; 0.65 = bright open dungeons. " +
+             "Decay per hop is derived automatically as falloffTarget^(1/steps).")]
+    public FloatRange lightFalloffTarget = new FloatRange(0.25f, 0.65f);
 
     [Header("Lighting — Tint")]
     [Tooltip("Chance that a biome's light colour matches its wall archetype hue")]
@@ -298,13 +308,20 @@ public class BiomeRegistry
         b.ceilingPatternStrength = cfg.ceilingPatternStrengthMin + (float)rng.NextDouble() * (cfg.ceilingPatternStrengthMax - cfg.ceilingPatternStrengthMin);
 
         // Lighting
-        b.lightPlacementChance  = cfg.lightPlacementChance.Random(rng);
-        b.lightDecay            = cfg.lightDecay.Random(rng);
+        b.lightPlacementChance = cfg.lightPlacementChance.Random(rng);
 
         // Propagation steps: uniform random in [min,max], squared to bias towards max
         float t = (float)rng.NextDouble();
         int stepRange = Mathf.Max(0, cfg.lightPropagationStepsMax - cfg.lightPropagationStepsMin);
         b.lightPropagationSteps = cfg.lightPropagationStepsMin + Mathf.RoundToInt(t * t * stepRange);
+
+        // Decay derived from falloff target — light always reaches exactly
+        // falloffTarget brightness at maximum propagation distance.
+        // decay = falloffTarget^(1/steps)  →  decay^steps = falloffTarget
+        b.lightFalloffTarget = cfg.lightFalloffTarget.Random(rng);
+        b.lightDecay = Mathf.Pow(
+            Mathf.Clamp(b.lightFalloffTarget, 0.001f, 0.999f),
+            1f / Mathf.Max(1, b.lightPropagationSteps));
 
         // Light tint
         float lightHue = (float)rng.NextDouble() < cfg.lightMatchesWallChance

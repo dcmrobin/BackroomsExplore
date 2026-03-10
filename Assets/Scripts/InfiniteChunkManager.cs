@@ -361,6 +361,12 @@ public class InfiniteChunkManager : MonoBehaviour
                 (capturedCoord.z + 0.5f) * capturedSize.z);
             BiomeDefinition capturedBiome = biomeRegistry.GetBiomeAt(chunkWorldCentre);
 
+            // Collect neighbour light seeds HERE on the main thread before dispatching.
+            // The background thread must never read loadedChunks (race condition).
+            float[][] capturedSeeds = CollectNeighbourLightSeeds(capturedCoord);
+            chunk.SetAllNeighbourLightSeeds(capturedSeeds);
+            chunk.SetAllNeighbourBorderVoxels(CollectNeighbourBorderVoxels(task.chunkCoord));
+
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 var result = new ChunkBuildResult
@@ -376,7 +382,7 @@ public class InfiniteChunkManager : MonoBehaviour
                 {
                     // Pass biome so room size, corridor dimensions etc vary per biome
                     roomGenerator.GenerateForChunk(capturedCoord, capturedSize, ref voxelData, capturedBiome);
-                    // BuildMeshData now also resolves + returns the biome
+                    // BuildMeshData uses seeds already set via SetAllNeighbourLightSeeds
                     result.meshData = chunk.BuildMeshData(voxelData, out result.biome);
                     result.success  = true;
                 }
@@ -430,7 +436,16 @@ public class InfiniteChunkManager : MonoBehaviour
                 // Pass biome so UploadMesh can apply material on main thread
                 result.chunk.UploadMesh(result.meshData, result.biome);
                 loadedChunks[result.chunkCoord] = result.chunk;
-                MarkAdjacentChunksForUpdate(result.chunkCoord);
+
+                // Push this new chunk's light outward to all neighbours (depth 0 = fresh)
+                cascadeDepth.Remove(result.chunkCoord);
+                MarkAdjacentChunksForUpdate(result.chunkCoord, 0);
+
+                // Also schedule THIS new chunk for a boundary rebuild so it pulls
+                // light inward from its already-lit neighbours. Without this, a new
+                // chunk sitting next to a brightly lit one stays dark until the
+                // neighbour happens to trigger a cascade update.
+                chunksNeedingBoundaryUpdate.Add(result.chunkCoord);
 
                 uploaded++;
             }
@@ -460,6 +475,13 @@ public class InfiniteChunkManager : MonoBehaviour
                     && loadedChunks.ContainsKey(result.chunkCoord))
                 {
                     result.chunk.UploadMesh(result.meshData, result.biome);
+                    // Cascade: push this chunk's freshly-computed boundary light
+                    // to its own neighbours so light propagates across more than
+                    // one chunk boundary. Pass the accumulated depth so we stop
+                    // cascading once light has fallen below the visible threshold.
+                    int depth = cascadeDepth.TryGetValue(result.chunkCoord, out int d) ? d : 0;
+                    cascadeDepth.Remove(result.chunkCoord);
+                    MarkAdjacentChunksForUpdate(result.chunkCoord, depth);
                 }
                 uploaded++;
             }
@@ -494,9 +516,22 @@ public class InfiniteChunkManager : MonoBehaviour
 
             currentlyRebuildingBoundary.Add(coord);
 
-            Vector3Int        capturedCoord = coord;
-            DungeonChunk      capturedChunk = chunk;
-            NativeArray<byte> capturedVox   = voxelData;
+            Vector3Int   capturedCoord = coord;
+            DungeonChunk capturedChunk = chunk;
+
+            // Copy voxel data into a managed array HERE on the main thread.
+            // The NativeArray in chunkVoxelCache can be disposed at any time if
+            // the chunk unloads — copying now means the background thread never
+            // touches the NativeArray directly, eliminating the race condition.
+            byte[] voxelSnapshot = voxelData.ToArray();
+
+            // Collect fresh neighbour seeds AND border voxels on main thread.
+            // Both must be pre-baked here so the background thread never reads
+            // chunkVoxelCache or loadedChunks directly.
+            float[][] boundarySeeds   = CollectNeighbourLightSeeds(capturedCoord);
+            bool[][]  borderVoxels    = CollectNeighbourBorderVoxels(capturedCoord);
+            capturedChunk.SetAllNeighbourLightSeeds(boundarySeeds);
+            capturedChunk.SetAllNeighbourBorderVoxels(borderVoxels);
 
             ThreadPool.QueueUserWorkItem(_ =>
             {
@@ -504,18 +539,18 @@ public class InfiniteChunkManager : MonoBehaviour
                 {
                     chunkCoord = capturedCoord,
                     chunk      = capturedChunk,
-                    voxelData  = capturedVox,
+                    voxelData  = default, // boundary rebuilds don't own voxel data
                     success    = false
                 };
 
                 try
                 {
-                    result.meshData = capturedChunk.BuildMeshData(capturedVox, out result.biome);
+                    result.meshData = capturedChunk.BuildMeshDataFromSnapshot(voxelSnapshot, out result.biome);
                     result.success  = true;
                 }
                 catch (System.Exception e)
                 {
-                    Debug.LogError($"[Thread] Boundary rebuild {capturedCoord} failed: {e.Message}");
+                    Debug.LogError($"[Thread] Boundary rebuild {capturedCoord} failed: {e.Message} {e.StackTrace}");
                 }
 
                 lock (uploadLock)
@@ -524,14 +559,194 @@ public class InfiniteChunkManager : MonoBehaviour
         }
     }
 
-    private void MarkAdjacentChunksForUpdate(Vector3Int coord)
+    // Maps chunk coord → how many cascade hops it has already travelled.
+    private Dictionary<Vector3Int, int> cascadeDepth = new Dictionary<Vector3Int, int>();
+    // Maps "chunkCoord_faceIndex" → hash of last exported light slice on that face.
+    // We only cascade to a neighbour if the slice actually changed — this prevents
+    // two adjacent chunks with stable light from endlessly rebuilding each other.
+    private Dictionary<long, int> exportedLightHash = new Dictionary<long, int>();
+    private const float LIGHT_CASCADE_THRESHOLD = 0.02f;
+    private const int MAX_CASCADE_DEPTH = 8;
+
+    private void MarkAdjacentChunksForUpdate(Vector3Int coord, int depth = 0)
     {
-        foreach (var dir in CardinalDirections)
+        if (depth >= MAX_CASCADE_DEPTH) return;
+
+        // Export this chunk's boundary light slices and push them to each loaded neighbour,
+        // then mark the neighbour for a lighting-aware rebuild so cross-chunk light bleeds in.
+        if (loadedChunks.TryGetValue(coord, out DungeonChunk srcChunk))
         {
-            Vector3Int adj = coord + dir;
-            if (loadedChunks.ContainsKey(adj))
-                chunksNeedingBoundaryUpdate.Add(adj);
+            for (int fi = 0; fi < CardinalDirections.Length; fi++)
+            {
+                Vector3Int dir = CardinalDirections[fi];
+                Vector3Int adj = coord + dir;
+                if (!loadedChunks.TryGetValue(adj, out DungeonChunk adjChunk)) continue;
+
+                float[] slice = srcChunk.ExportBoundaryLightSlice(dir);
+                if (slice == null) continue;
+
+                float maxVal = 0f;
+                int   sliceHash = 17;
+                foreach (float v in slice)
+                {
+                    if (v > maxVal) maxVal = v;
+                    sliceHash = sliceHash * 31 + v.GetHashCode();
+                }
+                if (maxVal < LIGHT_CASCADE_THRESHOLD) continue;
+
+                // Only cascade if this face's light actually changed
+                long hashKey = ((long)(coord.x + 10000) * 20001L + (coord.y + 10000)) * 20001L
+                             + (coord.z + 10000) + (long)fi * 400060001L;
+                if (exportedLightHash.TryGetValue(hashKey, out int prevHash) && prevHash == sliceHash)
+                    continue;
+                exportedLightHash[hashKey] = sliceHash;
+
+                adjChunk.SetNeighbourLightSeeds(-dir, slice);
+
+                int existingDepth = cascadeDepth.TryGetValue(adj, out int d) ? d : int.MaxValue;
+                if (depth + 1 < existingDepth)
+                {
+                    cascadeDepth[adj] = depth + 1;
+                    chunksNeedingBoundaryUpdate.Add(adj);
+                }
+            }
         }
+        else
+        {
+            foreach (var dir in CardinalDirections)
+            {
+                Vector3Int adj = coord + dir;
+                if (loadedChunks.ContainsKey(adj))
+                    chunksNeedingBoundaryUpdate.Add(adj);
+            }
+        }
+    }
+
+    // Called by DungeonChunk.SetNeighbourLightSeeds — schedules a lighting+mesh rebuild.
+    public void MarkChunkForLightingRebuild(Vector3Int coord)
+    {
+        if (loadedChunks.ContainsKey(coord))
+            chunksNeedingBoundaryUpdate.Add(coord);
+    }
+
+    // MAIN THREAD ONLY. For each of 6 faces, collects the border row of voxel solidity
+    // from the adjacent chunk so the background thread can do cross-chunk face culling
+    // without ever touching chunkVoxelCache or loadedChunks.
+    private bool[][] CollectNeighbourBorderVoxels(Vector3Int coord)
+    {
+        bool[][] result = new bool[6][];
+        int sx = chunkSize.x, sy = chunkSize.y, sz = chunkSize.z;
+
+        // Face order: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5
+        Vector3Int[] dirs = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up,    Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+
+        for (int fi = 0; fi < 6; fi++)
+        {
+            Vector3Int nCoord = coord + dirs[fi];
+            if (!chunkVoxelCache.TryGetValue(nCoord, out NativeArray<byte> nVox)) continue;
+
+            bool[] border;
+            if (fi <= 1) // X faces: border is sy*sz, u=y, v=z
+            {
+                border = new bool[sy * sz];
+                int bx = (fi == 0) ? 0 : sx - 1; // neighbour's border x
+                for (int y = 0; y < sy; y++)
+                for (int z = 0; z < sz; z++)
+                    border[y * sz + z] = nVox[bx * sy * sz + y * sz + z] != 0;
+            }
+            else if (fi <= 3) // Y faces: border is sx*sz, u=x, v=z
+            {
+                border = new bool[sx * sz];
+                int by = (fi == 2) ? 0 : sy - 1;
+                for (int x = 0; x < sx; x++)
+                for (int z = 0; z < sz; z++)
+                    border[x * sz + z] = nVox[x * sy * sz + by * sz + z] != 0;
+            }
+            else // Z faces: border is sx*sy, u=x, v=y
+            {
+                border = new bool[sx * sy];
+                int bz = (fi == 4) ? 0 : sz - 1;
+                for (int x = 0; x < sx; x++)
+                for (int y = 0; y < sy; y++)
+                    border[x * sy + y] = nVox[x * sy * sz + y * sz + bz] != 0;
+            }
+            result[fi] = border;
+        }
+        return result;
+    }
+
+    // MAIN THREAD ONLY. Collects boundary light slices from all 6 loaded neighbours
+    // of chunkCoord. Returns a float[6][] ready to pass to chunk.SetAllNeighbourLightSeeds()
+    // before dispatching the build job. This avoids the background-thread race condition
+    // that existed when DungeonChunk called GetLightAtWorldPos from a ThreadPool thread.
+    private float[][] CollectNeighbourLightSeeds(Vector3Int chunkCoord)
+    {
+        float[][] seeds = new float[6][];
+
+        int sx = chunkSize.x, sy = chunkSize.y, sz = chunkSize.z;
+        Vector3Int origin = Vector3Int.Scale(chunkCoord, chunkSize);
+
+        // Face indices match FaceIndexToDir in DungeonChunk: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5
+        Vector3Int[] dirs = {
+            Vector3Int.right, Vector3Int.left,
+            Vector3Int.up,    Vector3Int.down,
+            Vector3Int.forward, Vector3Int.back
+        };
+
+        for (int fi = 0; fi < 6; fi++)
+        {
+            Vector3Int dir = dirs[fi];
+
+            // Only sample if the neighbour chunk is loaded and lit
+            Vector3Int neighbourCoord = chunkCoord + dir;
+            if (!loadedChunks.TryGetValue(neighbourCoord, out DungeonChunk neighbour)) continue;
+
+            // Sample the row of voxels that sit just INSIDE the neighbour (1 voxel past the boundary)
+            float[] slice;
+            bool anyData = false;
+
+            if (dir == Vector3Int.right || dir == Vector3Int.left)
+            {
+                int wx = dir == Vector3Int.right ? origin.x + sx : origin.x - 1;
+                slice = new float[sy * sz];
+                for (int y = 0; y < sy; y++)
+                for (int z = 0; z < sz; z++)
+                {
+                    float v = GetLightAtWorldPos(new Vector3Int(wx, origin.y + y, origin.z + z));
+                    if (v >= 0f) { slice[y * sz + z] = v; anyData = true; }
+                }
+            }
+            else if (dir == Vector3Int.up || dir == Vector3Int.down)
+            {
+                int wy = dir == Vector3Int.up ? origin.y + sy : origin.y - 1;
+                slice = new float[sx * sz];
+                for (int x = 0; x < sx; x++)
+                for (int z = 0; z < sz; z++)
+                {
+                    float v = GetLightAtWorldPos(new Vector3Int(origin.x + x, wy, origin.z + z));
+                    if (v >= 0f) { slice[x * sz + z] = v; anyData = true; }
+                }
+            }
+            else // forward / back
+            {
+                int wz = dir == Vector3Int.forward ? origin.z + sz : origin.z - 1;
+                slice = new float[sx * sy];
+                for (int x = 0; x < sx; x++)
+                for (int y = 0; y < sy; y++)
+                {
+                    float v = GetLightAtWorldPos(new Vector3Int(origin.x + x, origin.y + y, wz));
+                    if (v >= 0f) { slice[x * sy + y] = v; anyData = true; }
+                }
+            }
+
+            if (anyData) seeds[fi] = slice;
+        }
+
+        return seeds;
     }
 
     // -------------------------------------------------------------------------
@@ -599,6 +814,14 @@ public class InfiniteChunkManager : MonoBehaviour
         ReturnChunkToPool(chunk);
         loadedChunks.Remove(coord);
         roomGenerator.ClearChunkData(coord);
+        // Clear cached light hashes for this chunk's 6 faces so a freshly
+        // generated chunk at the same coord gets proper cascade initialisation.
+        for (int fi = 0; fi < 6; fi++)
+        {
+            long hashKey = ((long)(coord.x + 10000) * 20001L + (coord.y + 10000)) * 20001L
+                         + (coord.z + 10000) + (long)fi * 400060001L;
+            exportedLightHash.Remove(hashKey);
+        }
 
         if (chunkVoxelCache.TryGetValue(coord, out NativeArray<byte> vd))
         {
